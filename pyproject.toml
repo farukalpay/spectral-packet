@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spectral-packet-engine"
+version = "0.1.0"
+description = "Physics-grounded 1D spectral dynamics, real-profile compression, and TensorFlow surrogates"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.0",
+  "torch>=2.4",
+]
+
+[project.optional-dependencies]
+data = [
+  "pooch>=1.8",
+  "scipy>=1.14",
+]
+examples = [
+  "matplotlib>=3.8",
+]
+ml = [
+  "tensorflow>=2.17,<2.22; python_version < '3.14'",
+  "tensorboard>=2.17; python_version < '3.14'",
+  "tensorboard_plugin_profile>=2.17; python_version < '3.14'",
+]
+ml-cuda = [
+  "tensorflow[and-cuda]>=2.17,<2.22; platform_system == 'Linux' and python_version < '3.14'",
+  "tensorboard>=2.17; platform_system == 'Linux' and python_version < '3.14'",
+  "tensorboard_plugin_profile>=2.17; platform_system == 'Linux' and python_version < '3.14'",
+]
+dev = [
+  "pytest>=8.3",
+  "pooch>=1.8",
+  "scipy>=1.14",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
