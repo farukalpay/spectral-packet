@@ -1,273 +1,490 @@
 # Spectral Packet Engine
 
-Spectral Packet Engine is a bounded-domain physics and ML library for people who need more than a small Schrodinger notebook.
+Spectral Packet Engine is a cross-platform scientific compute library for bounded-domain modal simulation, spectral decomposition, and inverse reconstruction.
 
-It combines four jobs under one interface:
+It is designed as a real product surface, not a manuscript archive:
 
-1. exact spectral simulation of localized wave packets in a 1D box,
-2. inverse recovery of packet parameters from observations,
-3. compression and analysis of real bounded density profiles from a published experiment,
-4. a TensorFlow surrogate that learns `density profile + time -> modal coefficients + moments`.
+- use it directly as a Python package,
+- run packaged workflows through a CLI,
+- expose the same compute engine through MCP,
+- optionally serve it as a local or self-hosted HTTP API.
 
-The repository is meant to be useful as a library, not only as a reference exercise. It gives you one codebase for analytic models, real measurements, and repeated inference workloads.
+## Day-1 Path
 
-## Why use it
+From a fresh source checkout:
 
-Most repositories in this area stop at "here is a solver". That leaves three practical questions unanswered:
+1. install the package,
+2. validate the local environment,
+3. run one bundled table workflow,
+4. choose Python, CLI, MCP, or API based on how you want to integrate the engine.
 
-- How do you fit a compact packet model back to observations?
-- How do you prove the basis is useful on real detector data, not only on synthetic states?
-- How do you replace repeated profile-to-mode projection with a trainable surrogate?
+Minimal path:
 
-This library answers all three.
+```bash
+python3 -m pip install -e .
+spectral-packet-engine --version
+spectral-packet-engine validate-install --device cpu
+spectral-packet-engine compress-table examples/data/synthetic_profiles.csv --modes 8 --device cpu --output-dir artifacts/compression
+```
 
-Use it when you want to:
+If you want the shortest clone-to-first-run guide, start with [docs/getting-started.md](docs/getting-started.md).
 
-- simulate bounded packet dynamics without hiding the spectral truncation machinery,
-- estimate packet parameters from density data with differentiable optimization,
-- compress real experimental line profiles into a compact bounded basis,
-- benchmark how modal resolution trades off against reconstruction error,
-- export a trained TensorFlow model for repeated inference.
+## What It Is For
 
-## What the library contains
+Install this project if you need one or more of these workflows:
 
-### Physics layer
+- project localized packet states into a bounded modal basis,
+- analyze the spectral structure of observed profile tables,
+- ingest tabular data from files or SQL queries before routing it into spectral workflows,
+- propagate those modal states exactly in time,
+- reconstruct compact packet parameters from observed densities,
+- compress bounded profile data into modal coefficients,
+- compare reference and candidate profile tables with domain metrics,
+- bootstrap a local SQLite workflow or query a remote database when SQLAlchemy is installed,
+- run those workflows through Python, CLI, MCP, or an HTTP service without rewriting the compute logic.
 
-`src/spectral_packet_engine/domain.py`, `basis.py`, `state.py`, `projector.py`, `dynamics.py`, and `simulation.py` implement:
+## What It Is Not
 
-- a 1D infinite-well domain,
-- packet and spectral state representations,
-- packet-to-basis projection,
-- exact spectral time evolution,
-- structured simulation outputs and observable queries.
+- Not a generic AI wrapper.
+- Not a paper-first repository.
+- Not a generic physics-everything engine.
+- Not a chat platform.
 
-### Inverse layer
+The product identity is narrow on purpose:
 
-`src/spectral_packet_engine/inference.py` provides differentiable packet reconstruction with `torch.autograd`.
+`bounded-domain spectral packet engine -> decomposition / propagation / inverse reconstruction -> reusable compute interfaces`
 
-### Real-data layer
+This project is for researchers, scientific programmers, and engineering teams who need a reusable bounded-domain compute engine instead of a one-off notebook or a manuscript companion repo.
 
-`src/spectral_packet_engine/datasets.py` and `profiles.py` implement:
+## Product Surfaces
 
-- reproducible download of published transport data,
-- explicit preprocessing controls,
-- bounded-profile moments,
-- modal projection and reconstruction,
-- compression summaries on real measurements.
+| Surface | Purpose | Status |
+| --- | --- | --- |
+| Python library | In-process scientific compute and integration into your own code | Stable |
+| CLI | Local workflows, artifacts, scripting, CI, reproducible runs | Stable |
+| Tabular + SQLite workflows | File-backed and local-database data ingress into the spectral engine | Stable |
+| MCP server | Structured machine-side compute for LLM clients | Beta |
+| HTTP API | Optional self-hosted service layer over the same workflows | Beta |
+| Remote SQL backends | SQLAlchemy-backed access to non-SQLite databases | Beta |
+| Backend-aware modal surrogate | PyTorch-first modal-regression training and evaluation over profile tables | Beta |
+| JAX modal surrogate | Optional JAX/XLA path over the same backend-aware workflow surface | Beta |
+| TensorFlow surrogate | Compatibility path for TensorFlow-backed modal regression when installed | Experimental |
+| Published transport dataset wrapper | Optional real-data benchmark path | Experimental |
 
-### TensorFlow layer
+Run this first on any machine:
 
-`src/spectral_packet_engine/tf_surrogate.py` provides:
+```bash
+spectral-packet-engine validate-install --device cpu
+```
 
-- host/runtime inspection for TensorFlow workloads,
-- a time-conditioned multi-output regressor,
-- optional XLA and mixed-precision runtime setup,
-- `tf.data` batching, caching, and prefetching,
-- SavedModel export after training.
+For the final release-readiness summary and remaining known limits, see [docs/release-readiness-audit.md](docs/release-readiness-audit.md).
 
-## Why the real-data path matters
+## Why Install It
 
-The repository includes a benchmark on the published quantum-gas transport dataset from Zenodo:
+This package closes a common gap in scientific repos:
 
-- Dataset: *Replication Data for: Characterising transport in a quantum gas by measuring Drude weights*
-- DOI: [10.5281/zenodo.16701012](https://doi.org/10.5281/zenodo.16701012)
-- Example scan: `scan11879_56`
-- Measured grid used here: 126 positions, 31 time points, 75 shots per time point
-- Reported temperature in file: `39.0 +/- 3.27 nK`
+- the math is not detached from the implementation,
+- the implementation is not trapped in notebooks,
+- the interface layers are thin wrappers over the real engine,
+- artifacts and outputs are stable enough to script and test.
 
-On the shot-averaged normalized experimental profiles, sine-basis compression gives:
+## Direct Python Vs MCP Vs API
 
-| Modes | Mean relative L2 error | Max relative L2 error |
-|---|---:|---:|
-| 8 | 0.09565 | 0.10489 |
-| 16 | 0.03648 | 0.04852 |
-| 32 | 0.01644 | 0.02251 |
-| 64 | 0.00965 | 0.01334 |
+Use direct Python when:
 
-That is the practical value of the package: the bounded basis is not justified by theory alone, it is validated on real transport profiles.
+- you are writing your own code,
+- you want in-process tensors and result objects,
+- you want the lowest integration overhead.
+
+Use MCP when:
+
+- you want an LLM client to delegate structured compute to a machine-side backend,
+- you want bounded tools instead of arbitrary shell access,
+- you want reusable simulation, compression, inverse-fit, and training operations exposed as domain tools.
+- you want the backend to inspect tables, compare runs, and write artifact bundles after compute jobs.
+
+Use the API when:
+
+- you want a local or self-hosted network service,
+- you need HTTP integration from another process or machine,
+- you want the same workflows behind a web boundary.
 
 ## Installation
 
-The core package requires Python 3.11 or newer. The TensorFlow path in this repository was verified on Python 3.11 because the default Python 3.14 environment on this machine does not currently provide TensorFlow wheels.
+### Core package
 
-### Core physics, inverse modeling, and real-data analysis
+After cloning the repository:
 
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[data,examples]"
-```
-
-The first real-data run downloads the published scan through `pooch` and stores it in the platform cache directory for `spectral-packet-engine`.
-
-### macOS / Apple Silicon
-
-For the TensorFlow benchmark path:
+Linux and macOS:
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[data,examples,ml]"
+python3 -m pip install .
 ```
 
-On Darwin, the `ml` extra includes `tensorflow-metal` through a platform marker. The physics side can still target Apple MPS independently through `inspect_torch_runtime("auto")`, so modal target generation can use the Mac GPU even when TensorFlow exposes no GPU device.
-
-### Windows
-
-Native Windows CPU workflow:
+Windows:
 
 ```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[data,examples,ml]"
+py -m pip install .
 ```
 
-Native Windows GPU is not the recommended TensorFlow path anymore. For GPU execution, use WSL2 and run the Linux-style setup inside that environment:
+You can also use the module entrypoint directly after installation:
+
+Linux and macOS:
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[data,examples]"
-python -m pip install "tensorflow[and-cuda]>=2.17,<2.22"
+python3 -m spectral_packet_engine --help
 ```
 
-### Linux / WSL2 CUDA
+Windows:
+
+```powershell
+py -m spectral_packet_engine --help
+```
+
+Check the installed release surface:
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[data,examples]"
-python -m pip install "tensorflow[and-cuda]>=2.17,<2.22"
+spectral-packet-engine --version
 ```
 
-## Quick start
+### Editable install for development
 
-### Reference bounded-packet workflows
+Linux and macOS:
 
 ```bash
-python examples/forward_reference.py
-python examples/packet_to_spectral.py
-python examples/inverse_reconstruction.py --device auto
+python3 -m pip install -e ".[dev]"
 ```
 
-### Real experimental profile benchmark
+Windows:
+
+```powershell
+py -m pip install -e ".[dev]"
+```
+
+### Optional extras
+
+- `data`: published dataset download and MATLAB loading
+- `files`: optional XLSX and Parquet file support through `openpyxl` and `pyarrow`
+- `sql`: remote SQL backends through SQLAlchemy
+- `examples`: plotting dependencies for the example scripts
+- `mcp`: MCP server runtime
+- `api`: FastAPI and Uvicorn
+- `ml`: TensorFlow surrogate on supported Python versions
+- `ml-jax`: JAX backend on supported non-Windows environments
+- `ml-cuda`: Linux CUDA TensorFlow path
+
+Examples:
 
 ```bash
-python examples/experimental_transport_analysis.py --plot-dir artifacts/transport
+python3 -m pip install -e ".[data,examples]"
+python3 -m pip install -e ".[files]"
+python3 -m pip install -e ".[sql]"
+python3 -m pip install -e ".[mcp,api]"
+python3 -m pip install -e ".[data,examples,ml]"
+python3 -m pip install -e ".[ml-jax]"
 ```
 
-This command downloads the published scan, projects the averaged detector profiles onto the bounded basis, reports compression error, and writes figures.
+## Platform Support
 
-### TensorFlow benchmark with exported artifacts
+The core library and CLI are designed for Linux, Windows, and macOS.
+
+Platform notes:
+
+- Linux: best overall path for CPU and CUDA-oriented workflows.
+- macOS: core library is fully supported; Torch MPS can be used when available; TensorFlow depends on a compatible Python and local TensorFlow stack.
+- Windows: core library, CLI, MCP, and API are supported; TensorFlow GPU is not the primary target, and WSL2 is the recommended path for GPU-oriented TensorFlow work.
+
+Run this to inspect the active machine:
 
 ```bash
-python examples/experimental_tf_regression.py \
-  --modes 16 \
-  --benchmark-modes 8 16 \
-  --epochs 10 \
-  --batch-size 128 \
-  --output-dir artifacts/tf_benchmark
+spectral-packet-engine env
 ```
 
-The benchmark command writes a reproducible result bundle:
+Detailed platform notes live in [docs/platforms.md](docs/platforms.md).
+Canonical day-1 workflows live in [docs/workflows.md](docs/workflows.md).
 
-- `artifacts/tf_benchmark/benchmark_summary.json`
-- `artifacts/tf_benchmark/mode_16/report.json`
-- `artifacts/tf_benchmark/mode_16/history.csv`
-- `artifacts/tf_benchmark/mode_16/history.png`
-- `artifacts/tf_benchmark/mode_16/validation_reconstruction.png`
-- `artifacts/tf_benchmark/mode_sweep.png`
+## First Commands To Run
 
-If you also want an exported model:
+These commands assume you are working from a repository checkout so the bundled example data is present under `examples/data/`.
+
+Inspect the machine:
 
 ```bash
-python examples/experimental_tf_regression.py \
-  --modes 16 \
-  --epochs 10 \
-  --batch-size 128 \
-  --output-dir artifacts/tf_benchmark \
-  --export-dir artifacts/tf_benchmark/saved_model
+spectral-packet-engine validate-install --device cpu
 ```
 
-## Verified benchmark numbers
+Run a forward packet simulation and write artifacts:
 
-### Real-data modal compression
+```bash
+spectral-packet-engine forward --device cpu --output-dir artifacts/forward
+```
 
-The 32-mode reconstruction test used in the test suite satisfies:
+Inspect the bundled table example:
 
-- mean relative L2 error `< 0.02`
-- max relative L2 error `< 0.03`
+```bash
+spectral-packet-engine inspect-table examples/data/synthetic_profiles.csv --device cpu
+```
 
-### TensorFlow surrogate verification on this machine
+Inspect the same file through the generic tabular layer:
 
-Verified in a separate Python 3.11 environment with TensorFlow `2.21.0`:
+```bash
+spectral-packet-engine tabular-inspect examples/data/synthetic_profiles.csv
+```
 
-- primary configuration: 16 modes, 10 epochs, batch size 128
-- samples: 1741 shot-level profiles
-- train samples: 1393
-- validation samples: 348
-- parameter count: 807090
-- training throughput: `1397.47` profiles/s
-- validation inference throughput: `467.83` profiles/s
-- validation coefficient MSE: `8.49e-01`
-- validation moment MAE: `8.66e-02`
-- validation profile relative L2: `9.54e-02`
+Bootstrap a local SQLite workflow from the bundled table data:
 
-Platform result from that run:
+```bash
+spectral-packet-engine db-bootstrap artifacts/example.sqlite
+spectral-packet-engine db-write-table artifacts/example.sqlite profiles examples/data/synthetic_profiles.csv --if-exists replace
+spectral-packet-engine db-query artifacts/example.sqlite 'SELECT * FROM "profiles" ORDER BY time'
+spectral-packet-engine db-materialize-query artifacts/example.sqlite profiles_copy 'SELECT * FROM "profiles"' --replace
+spectral-packet-engine sql-analyze-table artifacts/example.sqlite 'SELECT * FROM "profiles" ORDER BY time' --modes 8 --device cpu
+```
 
-- TensorFlow visible GPUs: `0`
-- TensorFlow device types: `CPU`
-- Torch target backend for modal target generation: `mps`
+Read-oriented database commands such as `db-inspect`, `db-list-tables`, `db-describe-table`, `db-query`, and SQL-backed analysis expect an existing database. Use `db-bootstrap` to create a local SQLite file when you need one.
 
-The current code therefore supports a split acceleration strategy on MacBook hardware: Torch can use MPS for spectral targets while TensorFlow follows whatever devices it actually exposes.
+Inspect ML backend support and run the backend-aware surrogate path:
 
-## Repository layout
+```bash
+spectral-packet-engine ml-backends --device cpu
+spectral-packet-engine ml-evaluate-table examples/data/synthetic_profiles.csv --backend torch --modes 8 --epochs 6 --batch-size 2 --device cpu --output-dir artifacts/ml_eval
+```
 
-- `src/spectral_packet_engine/`: reusable library code
-- `examples/`: command-line workflows and benchmark entry points
-- `tests/`: reference and regression tests
-- `pyproject.toml`: packaging and extras
+Compress the bundled table example:
 
-## Design choices
+```bash
+spectral-packet-engine compress-table examples/data/synthetic_profiles.csv --modes 8 --device cpu --output-dir artifacts/compression
+```
 
-### Explicit preprocessing, not hidden cleanup
+Fit a Gaussian packet to the same CSV table:
 
-NaN filling, negative-value clipping, profile normalization, and dropping non-positive-mass shots are explicit controls in `DensityPreprocessingConfig`. The library does not silently invent a cleaned dataset.
+```bash
+spectral-packet-engine fit-table examples/data/synthetic_profiles.csv --device cpu --output-dir artifacts/inverse
+```
 
-### Profile analysis is separate from wavefunction analysis
+Run a batch sweep:
 
-Real detector density profiles are treated as bounded scalar fields, not as if they were full quantum states. That separation lives in `profiles.py` and avoids mixing experimental profile compression with state-vector projection logic.
+```bash
+spectral-packet-engine packet-sweep --centers 0.25 0.35 --widths 0.07 0.08 --wavenumbers 22 24 --device cpu --output-dir artifacts/packet_sweep
+```
 
-### The ML layer is optional
+## Python Quickstart
 
-The simulation and inverse stack stay usable without TensorFlow. The surrogate is an opt-in layer for repeated inference workloads, not a hidden runtime dependency of the physics engine.
+```python
+from spectral_packet_engine import simulate_gaussian_packet
 
-### Runtime decisions are inspectable
+summary = simulate_gaussian_packet(
+    center=0.30,
+    width=0.07,
+    wavenumber=25.0,
+    times=[0.0, 1e-3, 5e-3],
+    num_modes=128,
+    grid_points=512,
+    device="cpu",
+)
 
-Torch device selection and TensorFlow host/runtime selection are explicit. The code does not bury device choice behind opaque defaults.
+print(summary.expectation_position)
+print(summary.total_probability)
+print(summary.truncation.dominant_modes)
+```
+
+## CLI Workflows
+
+Main packaged commands:
+
+- `spectral-packet-engine env`
+- `spectral-packet-engine validate-install`
+- `spectral-packet-engine forward`
+- `spectral-packet-engine project`
+- `spectral-packet-engine inspect-table`
+- `spectral-packet-engine analyze-table`
+- `spectral-packet-engine compress-table`
+- `spectral-packet-engine compression-sweep`
+- `spectral-packet-engine fit-table`
+- `spectral-packet-engine compare-tables`
+- `spectral-packet-engine packet-sweep`
+- `spectral-packet-engine transport-benchmark`
+- `spectral-packet-engine tf-train-table`
+- `spectral-packet-engine tf-evaluate-table`
+- `spectral-packet-engine serve-mcp`
+- `spectral-packet-engine serve-api`
+
+CLI runs write stable artifacts when `--output-dir` is provided:
+
+- `forward_summary.json`
+- `forward_densities.csv`
+- `compression_summary.json`
+- `spectral_analysis.json`
+- `reconstruction.csv`
+- `coefficients.csv`
+- `inverse_fit.json`
+- `predicted_density.csv`
+- `table_comparison.json`
+- `residual_profiles.csv`
+- `sample_metrics.csv`
+- `transport_benchmark.json`
+- `ml_training.json`
+- `ml_evaluation.json`
+- `ml_reconstruction.csv`
+- `ml_coefficients.csv`
+- `ml_predicted_moments.csv`
+- `tf_training.json`
+- `tf_evaluation.json`
+- `tf_reconstruction.csv`
+- `tf_predicted_moments.csv`
+- `artifacts.json`
+
+## File Support
+
+Supported table formats:
+
+- CSV
+- TSV
+- JSON
+- XLSX with the optional `files` extra
+
+The packaged table workflow expects:
+
+- one `time` column,
+- one column per spatial position,
+- strictly increasing position columns,
+- rows shaped as one profile sample per time.
+
+Example file:
+
+- [examples/data/synthetic_profiles.csv](examples/data/synthetic_profiles.csv)
+- [examples/data/synthetic_profiles.tsv](examples/data/synthetic_profiles.tsv)
+- [examples/data/synthetic_profiles.json](examples/data/synthetic_profiles.json)
+
+This makes the local file path workflows portable across Linux, Windows, and macOS without hidden notebook assumptions. If you install the package outside a source checkout, bring your own table files instead of relying on `examples/data/`.
+
+## MCP Usage
+
+Install the MCP extra:
+
+```bash
+python3 -m pip install -e ".[mcp]"
+```
+
+Run the server over stdio:
+
+```bash
+spectral-packet-engine serve-mcp
+```
+
+The MCP layer exposes domain-aligned tools for:
+
+- environment inspection,
+- installation validation,
+- ML backend inspection,
+- database bootstrap, inspection, and query materialization,
+- spectral analysis of profile tables,
+- packet simulation,
+- modal projection,
+- packet sweeps,
+- table inspection and compression,
+- table comparison,
+- inverse fitting from table inputs,
+- transport benchmark runs,
+- backend-aware modal surrogate training and evaluation.
+
+More detail: [docs/mcp.md](docs/mcp.md)
+
+## API Usage
+
+Install the API extra:
+
+```bash
+python3 -m pip install -e ".[api]"
+```
+
+Start the service:
+
+```bash
+spectral-packet-engine serve-api --host 127.0.0.1 --port 8000
+```
+
+Example:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+The API can also write artifact bundles when an endpoint request includes an `output_dir`, and artifact listings can be retrieved through `GET /artifacts`.
+
+More detail: [docs/api.md](docs/api.md)
+
+## TensorFlow And ML
+
+The product now has one backend-aware modal-surrogate surface with multiple implementations:
+
+- PyTorch is the primary installed-by-default training backend because `torch` is already part of the core package.
+- JAX is available through the optional `ml-jax` extra on supported environments.
+- TensorFlow remains supported as an optional compatibility path through the `ml` extra.
+
+It is useful when:
+
+- you have repeated profile-to-mode inference workloads,
+- you want a trainable surrogate over modal coefficients and profile moments,
+- you want to evaluate reconstructed profiles and predicted modal coefficients on machine-side tables,
+- you want the same workflow surface from Python, CLI, MCP, or API while choosing the backend explicitly,
+- you understand that this path is secondary to the core spectral engine.
+
+If an ML backend is missing or incompatible, the core spectral library, SQL/data workflows, CLI, MCP, and API remain usable.
+
+## Examples To Run First
+
+- [examples/python_workflow.py](examples/python_workflow.py): direct Python workflow with artifact output
+- [examples/csv_profile_workflow.py](examples/csv_profile_workflow.py): table-driven spectral analysis, compression, inverse fitting, and comparison
+- [examples/ml_backend_workflow.py](examples/ml_backend_workflow.py): backend-aware modal-surrogate evaluation over a profile table
+- [examples/api_client_demo.py](examples/api_client_demo.py): minimal HTTP client against the optional API
+
+Additional compatibility and experimental examples:
+
+- [examples/tensorflow_evaluation_workflow.py](examples/tensorflow_evaluation_workflow.py): TensorFlow compatibility-path evaluation
+- [examples/forward_reference.py](examples/forward_reference.py): older reference simulation example
+- [examples/experimental_transport_analysis.py](examples/experimental_transport_analysis.py): published dataset benchmark
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md): product spine, architecture, and release-direction summary
+- [docs/release-readiness-audit.md](docs/release-readiness-audit.md): final release-readiness audit, trust-breaking issues, and remaining limits
+- [docs/platforms.md](docs/platforms.md): cross-platform support notes
+- [docs/mcp.md](docs/mcp.md): MCP setup and tool surface
+- [docs/api.md](docs/api.md): API setup and endpoint surface
+- [docs/getting-started.md](docs/getting-started.md): clone-to-first-run setup
+- [docs/workflows.md](docs/workflows.md): canonical day-1 workflows
+
+Legacy reference material is retained under [`docs/legacy/`](docs/legacy/README.md), but the files above are the current release-facing docs.
+
+## Repository Layout
+
+- [`src/spectral_packet_engine/`](src/spectral_packet_engine): library, workflows, CLI, MCP, API
+- [`examples/`](examples): runnable demos
+- [`tests/`](tests): regression and interface coverage
+- [`docs/`](docs): product and interface documentation
 
 ## Testing
 
-Run the standard suite with:
-
 ```bash
-python -m pytest -q
+pytest -q
 ```
 
-Current result in the default workspace environment:
+The test suite covers:
 
-- `17 passed, 1 skipped`
+- core modal math,
+- inverse fitting,
+- CSV profile I/O,
+- SQL and tabular workflows,
+- backend-aware PyTorch and JAX modal surrogates,
+- packaged workflows,
+- CLI behavior,
+- optional API and MCP surfaces when available.
 
-The skipped test is the optional TensorFlow test when TensorFlow is not installed in the active interpreter.
+## Troubleshooting
 
-## References
-
-- Experimental dataset: [Zenodo record 16701012](https://doi.org/10.5281/zenodo.16701012)
-- Associated paper: [Characterising transport in a quantum gas by measuring Drude weights](https://arxiv.org/abs/2508.17279)
-- TensorFlow installation guide: [Install TensorFlow with pip](https://www.tensorflow.org/install/pip)
-- Apple Metal plugin guide: [Get started with tensorflow-metal](https://developer.apple.com/metal/tensorflow-plugin/)
+- If `validate-install` reports that the API is unavailable, reinstall the `api` extra in a clean environment. The package checks for FastAPI stack compatibility, not just import presence.
+- If XLSX loading fails, install the `files` extra: `python3 -m pip install -e ".[files]"`.
+- If TensorFlow workflows are unavailable, use `spectral-packet-engine ml-backends --device cpu` to inspect the available PyTorch and JAX paths. The TensorFlow path remains optional.
+- If JAX is unavailable, install the `ml-jax` extra on a supported environment. Native Windows JAX support is not the primary target; prefer Linux, macOS, or WSL2.
+- If you are on Windows and want a GPU-oriented TensorFlow workflow, prefer WSL2 over native Windows TensorFlow GPU expectations.

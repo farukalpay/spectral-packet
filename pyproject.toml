@@ -4,19 +4,44 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectral-packet-engine"
-version = "0.1.0"
-description = "Physics-grounded 1D spectral dynamics, real-profile compression, and TensorFlow surrogates"
+version = "0.2.0"
+description = "Bounded-domain spectral packet simulation, modal decomposition, inverse reconstruction, and SQL-backed scientific data workflows"
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["spectral", "modal", "inverse-problem", "scientific-computing", "physics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+]
 dependencies = [
   "numpy>=2.0",
   "torch>=2.4",
 ]
 
+[project.scripts]
+spectral-packet-engine = "spectral_packet_engine.cli:main"
+
 [project.optional-dependencies]
 data = [
   "pooch>=1.8",
   "scipy>=1.14",
+]
+files = [
+  "openpyxl>=3.1",
+  "pyarrow>=16",
+]
+sql = [
+  "sqlalchemy>=2.0",
 ]
 examples = [
   "matplotlib>=3.8",
@@ -26,15 +51,34 @@ ml = [
   "tensorboard>=2.17; python_version < '3.14'",
   "tensorboard_plugin_profile>=2.17; python_version < '3.14'",
 ]
+ml-jax = [
+  "jax>=0.9; platform_system != 'Windows'",
+  "jaxlib>=0.9; platform_system != 'Windows'",
+]
 ml-cuda = [
   "tensorflow[and-cuda]>=2.17,<2.22; platform_system == 'Linux' and python_version < '3.14'",
   "tensorboard>=2.17; platform_system == 'Linux' and python_version < '3.14'",
   "tensorboard_plugin_profile>=2.17; platform_system == 'Linux' and python_version < '3.14'",
 ]
+mcp = [
+  "mcp[cli]>=1.0,<2",
+]
+api = [
+  "fastapi>=0.115.11,<0.116",
+  "uvicorn>=0.34,<0.35",
+]
 dev = [
   "pytest>=8.3",
+  "build>=1.4",
   "pooch>=1.8",
   "scipy>=1.14",
+  "matplotlib>=3.8",
+  "openpyxl>=3.1",
+  "pyarrow>=16",
+  "sqlalchemy>=2.0",
+  "twine>=6.2",
+  "jax>=0.9; platform_system != 'Windows'",
+  "jaxlib>=0.9; platform_system != 'Windows'",
 ]
 
 [tool.setuptools]
@@ -42,3 +86,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

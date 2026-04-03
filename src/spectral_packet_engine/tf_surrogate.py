@@ -190,10 +190,10 @@ def inspect_tensorflow_host() -> TensorFlowHostPlatform:
             system=system,
             machine=machine,
             python_version=python_version,
-            recommended_accelerator="Apple Metal PluggableDevice when tensorflow-metal is installed",
+            recommended_accelerator="CPU, or Apple Metal through the tensorflow-metal compatibility path",
             recommended_runtime=(
-                "Use Python 3.11 or 3.12, install tensorflow plus tensorflow-metal, "
-                "and verify that TensorFlow exposes a GPU device."
+                "Use Python 3.11 or 3.12. TensorFlow's official pip page does not provide official macOS GPU support; "
+                "use tensorflow plus tensorflow-metal only as a compatibility path and verify device visibility explicitly."
             ),
         )
     if system == "Windows":

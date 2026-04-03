@@ -191,10 +191,11 @@ def plot_metric_curve(
     label: str | None = None,
     title: str | None = None,
     xlabel: str = "x",
-    ylabel: str = "metric",
-    marker: str = "o",
-    linewidth: float = 1.8,
+    ylabel: str = "value",
     color=None,
+    marker: str = "o",
+    linewidth: float = 2.0,
+    log_scale: bool = False,
 ) -> Axes:
     """Plot a generic one-dimensional metric curve."""
 
@@ -203,7 +204,15 @@ def plot_metric_curve(
     if x_values.shape != y_values.shape:
         raise ValueError("x and y must have the same shape")
 
-    ax.plot(x_values, y_values, label=label, marker=marker, linewidth=linewidth, color=color)
+    plot_fn = ax.semilogy if log_scale else ax.plot
+    plot_fn(
+        x_values,
+        y_values,
+        label=label,
+        color=color,
+        marker=marker,
+        linewidth=linewidth,
+    )
     if label is not None:
         ax.legend(loc="best")
     return _set_common_axes(ax, title=title, xlabel=xlabel, ylabel=ylabel)
@@ -277,41 +286,6 @@ def plot_trajectory_summary(
     return ax, probability_ax
 
 
-def plot_metric_curve(
-    ax: Axes,
-    x: ArrayLike,
-    y: ArrayLike,
-    *,
-    label: str | None = None,
-    title: str | None = None,
-    xlabel: str = "x",
-    ylabel: str = "value",
-    color=None,
-    marker: str = "o",
-    linewidth: float = 2.0,
-    log_scale: bool = False,
-) -> Axes:
-    """Plot a generic one-dimensional metric curve."""
-
-    x_values = _coerce_1d("x", x)
-    y_values = _coerce_1d("y", y)
-    if x_values.shape != y_values.shape:
-        raise ValueError("x and y must have the same shape")
-
-    plot_fn = ax.semilogy if log_scale else ax.plot
-    plot_fn(
-        x_values,
-        y_values,
-        label=label,
-        color=color,
-        marker=marker,
-        linewidth=linewidth,
-    )
-    if label is not None:
-        ax.legend(loc="best")
-    return _set_common_axes(ax, title=title, xlabel=xlabel, ylabel=ylabel)
-
-
 def save_figure(
     fig: Figure,
     path: str | Path,
@@ -334,6 +308,7 @@ __all__ = [
     "plot_density",
     "plot_metric_curve",
     "plot_mode_weights",
+    "plot_profile_comparison",
     "plot_trajectory_summary",
     "plot_truncation_tail",
     "save_figure",
