@@ -1,0 +1,830 @@
+SPECTRAL PACKET ENGINE RECIPROCAL PUBLIC LICENSE
+Version 1.0, April 2026
+
+Copyright (c) 2026 Faruk Alpay. All rights reserved.
+
+================================================================================
+                          PREAMBLE AND STATEMENT OF INTENT
+================================================================================
+
+This License governs the use, reproduction, modification, distribution, and
+public performance of the software known as "Spectral Packet Engine" (the
+"Software"), a bounded-domain spectral computation library for packet
+simulation, modal decomposition, inverse reconstruction, and scientific data
+workflows.
+
+This License is designed to achieve the following objectives simultaneously:
+
+  (a) Ensure that the Software remains perpetually available as open-source
+      software that anyone may use, study, modify, and redistribute;
+
+  (b) Ensure that any person or entity that modifies, extends, or builds upon
+      the Software is legally required to make those modifications available to
+      the public under the same terms, thereby guaranteeing that improvements
+      flow back to the community;
+
+  (c) Ensure that the Software and its author receive proper attribution in all
+      derivative works, academic publications, commercial products, and public
+      communications;
+
+  (d) Provide an explicit, irrevocable grant of patent rights from each
+      contributor, with automatic termination upon patent aggression;
+
+  (e) Prevent any party from creating a substantially similar work and claiming
+      it as independent or unrelated to this Software;
+
+  (f) Encourage, through strong normative language, that users of this Software
+      who derive commercial or academic value from it contribute financially to
+      its continued development.
+
+This License is intended to be enforceable under the laws of the Republic of
+Turkey (FSEK Law No. 5846 on Intellectual and Artistic Works), the United States
+(Title 17 U.S.C.; 35 U.S.C.), the European Union (Directive 2009/24/EC on the
+legal protection of computer programs; Directive 2001/29/EC on copyright in the
+information society), and any other jurisdiction that recognizes the Berne
+Convention for the Protection of Literary and Artistic Works.
+
+This License is a COPYRIGHT LICENSE.  It operates as a conditional grant of
+rights under copyright law.  Violation of any condition of this License
+constitutes copyright infringement, not merely breach of contract, and is
+actionable under both statutory copyright law and contract law in all applicable
+jurisdictions.
+
+================================================================================
+                              ARTICLE 1 — DEFINITIONS
+================================================================================
+
+1.1  "License" means the terms and conditions set forth in this document in its
+     entirety, including all articles, sections, and subsections.
+
+1.2  "Licensor" means Faruk Alpay, the original author and copyright holder of
+     the Software, and any successor or assignee of the Licensor's rights.
+
+1.3  "Software" means the computer program known as "Spectral Packet Engine,"
+     including but not limited to all source code files, object code, build
+     scripts, configuration files, test suites, documentation, example files,
+     data files, and any other materials included in the official repository
+     located at the Licensor's designated hosting platform (currently GitHub),
+     in whatever form they exist at any point in the version history.
+
+1.4  "Source Code" means the preferred form of the Software for making
+     modifications to it.  For compiled languages, this includes all source
+     files necessary to generate the object code plus the scripts used to
+     control compilation and installation.  For interpreted languages such as
+     Python, the Source Code is the human-readable program text itself together
+     with all associated configuration, build, test, and documentation files.
+
+1.5  "Object Code" means any non-source form of a work, including but not
+     limited to compiled code, bytecode, minified code, obfuscated code,
+     serialized model weights derived from the Software's algorithms, and any
+     other form that is not the preferred form for modification.
+
+1.6  "Derivative Work" means any work that is based upon, incorporates,
+     extends, modifies, translates, adapts, transforms, or is otherwise derived
+     from the Software or any portion thereof, whether by modification of
+     existing Source Code, addition of new Source Code that links to or imports
+     from the Software, creation of a wrapper or interface layer around the
+     Software, porting the Software to a different programming language or
+     platform, or any other means by which a new work is created that contains
+     or is based upon copyrightable elements of the Software.
+
+     For the avoidance of doubt, the following are Derivative Works:
+
+     (a) A fork of the Software's repository, whether or not any modifications
+         have been made, if the fork is distributed to any third party;
+
+     (b) A software library, framework, or application that imports, links to,
+         calls, or otherwise depends upon any module, function, class, or
+         interface of the Software at compile time or at runtime;
+
+     (c) A software service, including but not limited to web applications, API
+         endpoints, microservices, and cloud functions, that incorporates the
+         Software or any Derivative Work as a component;
+
+     (d) A machine learning model, surrogate model, or statistical model whose
+         training process uses the Software's algorithms, basis functions,
+         spectral decomposition routines, or any other computational method
+         provided by the Software;
+
+     (e) A reimplementation in any programming language of any algorithm,
+         mathematical method, data structure, or computational technique that
+         is original to the Software and not part of the prior art, where such
+         reimplementation is substantially similar in structure, sequence, or
+         organization to the Software's implementation.
+
+     The following are NOT Derivative Works:
+
+     (f) Independent works that merely receive output data (e.g., JSON files,
+         CSV files, artifact bundles, numerical results) produced by the
+         Software, provided that such works do not incorporate any Source Code
+         or Object Code of the Software;
+
+     (g) Works that communicate with the Software solely through a documented,
+         stable, public protocol (such as MCP, HTTP, or SQL) without
+         incorporating any of the Software's code, provided that the Software
+         is used unmodified and is separately distributed under this License.
+
+1.7  "Contribution" means any work of authorship, including but not limited to
+     modifications, additions, deletions, bug fixes, feature implementations,
+     documentation changes, test additions, and performance improvements, that
+     is intentionally submitted to the Licensor for inclusion in the Software.
+     A Contribution is "submitted" when it is sent to the Licensor or the
+     Licensor's designated repository in any form, including but not limited to
+     pull requests, merge requests, patches, emails, or issue comments that
+     include code.
+
+1.8  "Contributor" means the Licensor and any natural or legal person that has
+     submitted a Contribution that has been accepted into the Software.
+
+1.9  "You" (or "Your") means any natural person, legal person, corporation,
+     partnership, joint venture, governmental body, educational institution, or
+     any other entity exercising rights under this License.
+
+1.10 "Distribution" means any act of making the Software or a Derivative Work
+     available to any third party by any means, including but not limited to
+     physical distribution of storage media, electronic transmission, making
+     available for download, hosting as a service, providing access through a
+     network, or any other means of conveyance.
+
+1.11 "Network Use" means enabling any third party to interact with the Software
+     or a Derivative Work over a computer network (including but not limited to
+     the Internet, local area networks, virtual private networks, and any other
+     interconnection of computing devices), whether through a graphical user
+     interface, an application programming interface (API), a machine-readable
+     protocol (including MCP), a command-line interface accessible via remote
+     shell, or any other remote interaction mechanism.
+
+1.12 "Commercial Use" means any use of the Software or a Derivative Work in
+     connection with any activity directed toward commercial advantage or
+     monetary compensation, including but not limited to: selling, licensing,
+     or sublicensing the Software or Derivative Works; using the Software to
+     provide paid services; incorporating the Software into a commercial
+     product; using the Software in a business process that generates revenue;
+     or using the Software in connection with paid consulting, training, or
+     support services.
+
+1.13 "Patent Claims" means any patent claim(s), now owned or hereafter acquired
+     by a Contributor, including without limitation method, process, apparatus,
+     and system claims, in any patent licensable by such Contributor that would
+     be infringed, but for the grant of this License, by the making, using,
+     selling, offering for sale, having made, importing, or transferring of
+     either the Software or any Contribution of such Contributor, considered
+     individually or in combination with the Software.
+
+1.14 "Essential Patent Claims" means, with respect to a Contributor, all Patent
+     Claims owned or controlled by the Contributor, whether already acquired or
+     hereafter acquired, that would be infringed by some manner, permitted by
+     this License, of making, using, or distributing its Contributions, but do
+     not include claims that would be infringed only as a consequence of further
+     modification of the Contribution.
+
+1.15 "Project Name" means the name "Spectral Packet Engine," the abbreviation
+     "SPE," and any associated logos, wordmarks, or trade dress designated by
+     the Licensor.
+
+================================================================================
+                    ARTICLE 2 — GRANT OF COPYRIGHT LICENSE
+================================================================================
+
+2.1  Subject to the terms and conditions of this License, each Contributor
+     hereby grants to You a worldwide, royalty-free, non-exclusive, perpetual
+     (for the duration of the applicable copyright) license to:
+
+     (a) reproduce the Software and Derivative Works thereof;
+     (b) prepare Derivative Works of the Software;
+     (c) publicly display the Software and Derivative Works thereof;
+     (d) publicly perform the Software and Derivative Works thereof;
+     (e) distribute copies of the Software and Derivative Works thereof; and
+     (f) sublicense the foregoing rights to third parties,
+
+     in each case solely in accordance with and subject to the conditions
+     stated in this License.
+
+2.2  This grant is conditional.  The rights granted in Section 2.1 are subject
+     to and conditioned upon Your compliance with every provision of this
+     License.  Any failure to comply with any condition of this License
+     automatically and immediately terminates the rights granted herein,
+     without notice and without opportunity to cure, and such termination
+     constitutes the basis for an action for copyright infringement.
+
+================================================================================
+                      ARTICLE 3 — GRANT OF PATENT LICENSE
+================================================================================
+
+3.1  Subject to the terms and conditions of this License, each Contributor
+     hereby grants to You a worldwide, royalty-free, non-exclusive, perpetual
+     (for the duration of the applicable patent) license under the
+     Contributor's Essential Patent Claims to make, have made, use, offer to
+     sell, sell, import, and otherwise transfer the Software and Derivative
+     Works thereof.
+
+3.2  PATENT RETALIATION.  If You (or any of Your subsidiaries, affiliates,
+     parent companies, or agents) institute patent litigation (including but
+     not limited to a cross-claim, counterclaim, declaratory judgment action,
+     or any other legal proceeding asserting patent rights) against any
+     Contributor, any user of the Software, or any user of any Derivative Work,
+     alleging that the Software or any Contribution constitutes direct or
+     contributory patent infringement, then:
+
+     (a) All patent licenses granted to You under this License for the Software
+         and all Contributions shall terminate as of the date such litigation
+         is filed;
+
+     (b) All copyright licenses granted to You under this License shall
+         terminate as of the date such litigation is filed;
+
+     (c) You shall immediately cease all use, reproduction, modification,
+         distribution, and Network Use of the Software and all Derivative
+         Works; and
+
+     (d) The Licensor and all Contributors shall be entitled to seek injunctive
+         relief, actual damages, statutory damages, and attorney's fees in any
+         court of competent jurisdiction.
+
+3.3  DEFENSIVE TERMINATION SCOPE.  The termination provisions of Section 3.2
+     apply regardless of whether the patent litigation is filed in connection
+     with the Software specifically or in connection with any other product or
+     service of any Contributor or user of the Software.  The purpose of this
+     provision is to create a patent non-aggression commitment among all
+     participants in the Software ecosystem.
+
+================================================================================
+                  ARTICLE 4 — CONDITIONS FOR REDISTRIBUTION
+================================================================================
+
+You may reproduce and distribute copies of the Software or Derivative Works
+thereof in Source Code or Object Code form, provided that You meet ALL of the
+following conditions:
+
+4.1  COPYLEFT OBLIGATION (SOURCE CODE AVAILABILITY).
+
+     (a) If You distribute the Software or any Derivative Work in any form
+         (Source Code, Object Code, or as a service via Network Use), You must
+         simultaneously make the complete corresponding Source Code of the
+         Software and the Derivative Work available to all recipients under
+         the terms of this License, at no charge beyond the reasonable cost of
+         physically performing the distribution.
+
+     (b) "Complete corresponding Source Code" means all Source Code needed to
+         generate, install, and (for an executable work) run the Object Code
+         and to modify the work, including scripts to control those activities,
+         plus all associated interface definition files, plus the scripts used
+         to control compilation and installation of the executable, plus all
+         Contribution history and revision metadata.  It does NOT include the
+         system libraries, general-purpose tools, or freely available source
+         code that is used unmodified in building the Derivative Work but is
+         not part of the Derivative Work itself.
+
+     (c) The Source Code must be made available through at least one of the
+         following mechanisms, at Your choice:
+
+         (i)   Hosting the Source Code in a publicly accessible version control
+               repository (e.g., GitHub, GitLab, Bitbucket, or any other
+               publicly accessible hosting platform) and providing a clear,
+               conspicuous, and permanent link to such repository in all
+               documentation, README files, and user-facing interfaces of the
+               Derivative Work;
+
+         (ii)  Including the complete Source Code alongside the Object Code in
+               every distribution, whether physical or electronic;
+
+         (iii) Providing a written offer, valid for at least three (3) years
+               and valid for as long as You offer spare parts or customer
+               support for the Derivative Work, to give any third party a
+               complete machine-readable copy of the corresponding Source Code,
+               at no charge, via one of the methods described in (i) or (ii).
+
+     (d) NETWORK USE COPYLEFT.  If You make the functionality of the Software
+         or any Derivative Work available to third parties through Network Use,
+         You must provide those third parties with access to the complete
+         corresponding Source Code of the version they are interacting with,
+         under the terms of this License.  This obligation applies regardless
+         of whether the Network Use constitutes Distribution under the laws of
+         any particular jurisdiction.
+
+         This provision is the functional equivalent of the "Affero clause"
+         found in the GNU Affero General Public License, version 3 (AGPL-3.0),
+         and is intended to close the "SaaS loophole" whereby modified versions
+         of the Software could be deployed as network services without making
+         the modifications available.
+
+4.2  SAME LICENSE REQUIREMENT (SHARE-ALIKE).
+
+     (a) Any Derivative Work that You distribute or make available through
+         Network Use must be licensed in its entirety under the terms of this
+         License.  You may not impose any additional terms, conditions,
+         restrictions, or obligations on the Software or any Derivative Work
+         beyond those stated in this License.
+
+     (b) You may not sublicense the Software or any Derivative Work under any
+         other license, including but not limited to the MIT License, the BSD
+         License, the Apache License, the GNU General Public License, or any
+         proprietary or commercial license, unless You have obtained explicit
+         prior written permission from the Licensor.
+
+     (c) You may not incorporate the Software or any Derivative Work into a
+         larger work that is licensed under terms incompatible with this
+         License, unless the Software and Derivative Work components remain
+         clearly separable and continue to be governed by this License.
+
+4.3  ATTRIBUTION REQUIREMENTS.
+
+     You must satisfy ALL of the following attribution requirements in
+     connection with any distribution or Network Use of the Software or any
+     Derivative Work:
+
+     (a) COPYRIGHT NOTICE PRESERVATION.  You must retain, in the Source Code
+         of the Software and all Derivative Works, all copyright notices,
+         license notices, disclaimer notices, and attribution notices that
+         appear in the Software as distributed by the Licensor.  You must not
+         alter, obscure, or remove any such notice.
+
+     (b) LICENSE FILE.  You must include a complete, unmodified copy of this
+         License in every distribution of the Software or any Derivative Work,
+         whether in Source Code or Object Code form.
+
+     (c) PROMINENT ATTRIBUTION.  You must include the following attribution
+         notice in a prominent location in:
+         - the README or equivalent documentation file of any Derivative Work;
+         - any "About" page, credits screen, or equivalent user-facing
+           information display of any application or service built with the
+           Software;
+         - any marketing materials, press releases, blog posts, or public
+           communications that describe the Derivative Work's capabilities,
+           if those capabilities are derived from the Software:
+
+         ---------------------------------------------------------------
+         This [software/service/product] is built with or derived from
+         Spectral Packet Engine (https://github.com/farukalpay/spectral-packet-engine),
+         created by Faruk Alpay, licensed under the SPE-RPL v1.0.
+         ---------------------------------------------------------------
+
+         The exact URL and attribution text may be updated by the Licensor from
+         time to time; You must use the most current version available in the
+         official repository.
+
+     (d) ACADEMIC AND SCIENTIFIC ATTRIBUTION.  If You use the Software or any
+         Derivative Work in connection with any academic research, scientific
+         publication, conference presentation, thesis, dissertation, technical
+         report, preprint, or any other scholarly communication, You must cite
+         the Software using the citation information provided in the official
+         repository's CITATION.cff or CITATION.bib file, or, if no such file
+         exists, using the following format:
+
+         Alpay, F. (2026). Spectral Packet Engine: Bounded-domain spectral
+         computation for packet simulation, modal analysis, and inverse
+         reconstruction. https://github.com/farukalpay/spectral-packet-engine
+
+         Failure to provide academic attribution as specified in this Section
+         constitutes a violation of this License and may be enforced as
+         copyright infringement.
+
+     (e) METADATA ATTRIBUTION.  If the Derivative Work is distributed as a
+         software package through any package manager, registry, or
+         distribution platform (including but not limited to PyPI, conda-forge,
+         npm, crates.io, NuGet, or any other package distribution system), the
+         package metadata must include "spectral-packet-engine" as a listed
+         dependency or as a credited upstream project in the package description
+         or metadata fields.
+
+4.4  CONTRIBUTION-BACK OBLIGATION.
+
+     (a) If You create a Derivative Work that modifies, extends, improves, or
+         fixes any component of the Software's core computational engine
+         (including but not limited to: spectral basis implementations,
+         decomposition algorithms, propagation routines, inverse reconstruction
+         methods, convergence diagnostics, energy functionals, momentum
+         observables, profile compression algorithms, or any mathematical or
+         physical computation module), You must make a good-faith effort to
+         submit those modifications as a Contribution to the Licensor's
+         official repository within ninety (90) calendar days of the first
+         Distribution or Network Use of the Derivative Work.
+
+     (b) "Good-faith effort" means, at minimum:
+         (i)   Opening a pull request or merge request to the official
+               repository containing the modifications in a form suitable for
+               review and integration;
+         (ii)  Providing a clear description of the modifications and their
+               purpose;
+         (iii) Responding to reasonable review comments from the Licensor or
+               other Contributors within thirty (30) calendar days.
+
+     (c) The Licensor is under no obligation to accept any Contribution.  If
+         the Licensor declines a Contribution, Your obligation under this
+         Section is satisfied, provided You have made the good-faith effort
+         described in subsection (b).
+
+     (d) This Section does not require You to submit Contributions that consist
+         solely of application-specific business logic, user interface code,
+         configuration, or other components that are specific to Your particular
+         use case and do not constitute improvements to the Software's core
+         computational capabilities.
+
+     (e) For the avoidance of doubt, this contribution-back obligation is in
+         addition to, and does not replace, the Source Code availability
+         obligation in Section 4.1.  Even if You submit a Contribution that is
+         declined, You must still make the complete Source Code available as
+         required by Section 4.1.
+
+4.5  ANTI-CIRCUMVENTION.
+
+     (a) You may not use any technical measure, legal mechanism, contractual
+         arrangement, or other device to prevent or restrict any recipient of
+         the Software or a Derivative Work from exercising the rights granted
+         under this License, including but not limited to:
+
+         (i)   Digital rights management (DRM) mechanisms;
+         (ii)  Technical protection measures (TPMs);
+         (iii) Hardware restrictions that prevent execution of modified
+               versions (anti-tivoization);
+         (iv)  Contractual terms that restrict recipients' rights under this
+               License (e.g., non-compete clauses, non-disclosure agreements,
+               or terms of service that prohibit modification or redistribution);
+         (v)   Obfuscation of Source Code or Object Code for the purpose of
+               making modification more difficult.
+
+     (b) If You distribute the Software or a Derivative Work in conjunction
+         with any device, platform, or system that imposes technical
+         restrictions on the installation or execution of modified software,
+         You must also provide sufficient installation information to enable
+         the recipient to install and execute modified versions of the Software
+         or Derivative Work on that device, platform, or system.
+
+================================================================================
+                  ARTICLE 5 — ANTI-MISAPPROPRIATION PROVISIONS
+================================================================================
+
+5.1  PROHIBITION ON MISREPRESENTATION OF ORIGIN.
+
+     (a) You may not represent, directly or by implication, that any Derivative
+         Work is the original Software or is unrelated to the Software.
+
+     (b) You may not remove, alter, or obscure any indication that a Derivative
+         Work is derived from the Software.
+
+     (c) If You create a Derivative Work that provides substantially similar
+         functionality to the Software (including but not limited to spectral
+         decomposition, modal analysis, wave-packet simulation, profile
+         compression, or inverse reconstruction on bounded domains), You must
+         include a clear and prominent statement in the Derivative Work's
+         documentation, README, and any public description that the Derivative
+         Work is derived from or based upon Spectral Packet Engine.
+
+5.2  SUBSTANTIALLY SIMILAR WORKS.
+
+     (a) If You independently develop a work that is substantially similar to
+         the Software in structure, sequence, or organization, and You had
+         access to the Software's Source Code prior to or during the
+         development of such work, such work shall be presumed to be a
+         Derivative Work under this License, and You bear the burden of proving
+         by clear and convincing evidence that no copying occurred.
+
+     (b) Evidence of substantial similarity includes but is not limited to:
+         similar variable names, function names, class hierarchies, algorithm
+         structures, code organization, file structures, API designs, error
+         messages, comments, documentation patterns, and data structures.
+
+     (c) This presumption is consistent with the "access plus substantial
+         similarity" test applied by courts in the United States (Arnstein v.
+         Porter, 154 F.2d 464, 2d Cir. 1946; Oracle Am., Inc. v. Google LLC,
+         593 U.S. 1, 2021), the European Union (SAS Institute Inc v. World
+         Programming Ltd, C-406/10, CJEU 2012), and Turkey (FSEK Articles 1
+         and 2; Turkish Court of Cassation precedent on software originality).
+
+5.3  TRADEMARK RESERVATION.
+
+     (a) This License does not grant You any right to use the Project Name,
+         any trademark, service mark, trade name, logo, or trade dress of the
+         Licensor, except as necessary to comply with the attribution
+         requirements of Section 4.3.
+
+     (b) You must not use the Project Name or any confusingly similar name in
+         the title, package name, module name, command name, or primary
+         identifier of any Derivative Work without the Licensor's prior
+         written consent.
+
+     (c) You may describe Your Derivative Work as "based on Spectral Packet
+         Engine" or "derived from Spectral Packet Engine" without additional
+         permission, provided such description is accurate and does not imply
+         endorsement by the Licensor.
+
+================================================================================
+                     ARTICLE 6 — COMMUNITY SUSTAINABILITY
+================================================================================
+
+6.1  FINANCIAL SUSTAINABILITY STATEMENT.
+
+     The continued development, maintenance, security patching, and improvement
+     of the Software depends upon the voluntary financial support of its user
+     community.  The Licensor invests substantial time, expertise, and resources
+     into the Software and makes it available at no charge for the public good.
+
+6.2  DONATION EXPECTATION.
+
+     (a) If You or Your organization derive commercial value from the Software,
+         including but not limited to: using the Software in a revenue-
+         generating product or service; using the Software to reduce
+         development costs; using the Software in paid research or consulting;
+         or using the Software to train employees or students in connection
+         with a commercial enterprise, You SHOULD make a financial contribution
+         to the Software's development through the donation mechanism designated
+         by the Licensor (currently specified in the official repository's
+         FUNDING.yml or equivalent file).
+
+     (b) The recommended contribution amounts are:
+
+         (i)   Individual developers and students: voluntary, any amount;
+         (ii)  Small organizations (fewer than 50 employees): at least $100 USD
+               per year or equivalent in local currency;
+         (iii) Medium organizations (50-500 employees): at least $500 USD per
+               year or equivalent in local currency;
+         (iv)  Large organizations (more than 500 employees): at least $2,000
+               USD per year or equivalent in local currency.
+
+     (c) The amounts in Section 6.2(b) are RECOMMENDED GUIDELINES, not legally
+         binding obligations.  Failure to make a financial contribution does
+         not constitute a violation of this License and does not result in
+         termination of any rights granted herein.
+
+     (d) Notwithstanding Section 6.2(c), any organization that derives
+         significant commercial value from the Software and declines to make
+         any voluntary contribution SHOULD consider whether its use of the
+         Software without reciprocal support is consistent with the ethical
+         principles of the open-source community and the sustainable
+         development of shared scientific infrastructure.
+
+6.3  CONTRIBUTION ACKNOWLEDGMENT.
+
+     Financial contributors may be acknowledged in the Software's documentation,
+     website, or repository at the Licensor's discretion.  No contribution
+     entitles the contributor to any additional rights, privileges, or
+     influence over the Software's development beyond those already granted
+     by this License.
+
+================================================================================
+            ARTICLE 7 — DISCLAIMER OF WARRANTY AND LIMITATION OF LIABILITY
+================================================================================
+
+7.1  DISCLAIMER OF WARRANTY.
+
+     THE SOFTWARE IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS
+     OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+     MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE,
+     NON-INFRINGEMENT, ACCURACY, COMPLETENESS, RELIABILITY, SECURITY,
+     OR COMPATIBILITY.
+
+     THE LICENSOR AND ALL CONTRIBUTORS MAKE NO REPRESENTATION OR WARRANTY
+     THAT THE SOFTWARE WILL MEET YOUR REQUIREMENTS, THAT THE OPERATION OF THE
+     SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, THAT DEFECTS IN THE
+     SOFTWARE WILL BE CORRECTED, OR THAT THE SOFTWARE IS FREE OF VIRUSES OR
+     OTHER HARMFUL COMPONENTS.
+
+     THE LICENSOR AND ALL CONTRIBUTORS MAKE NO REPRESENTATION OR WARRANTY
+     REGARDING THE CORRECTNESS, ACCURACY, OR RELIABILITY OF ANY MATHEMATICAL,
+     PHYSICAL, OR COMPUTATIONAL RESULTS PRODUCED BY THE SOFTWARE.  THE
+     SOFTWARE IS A RESEARCH TOOL AND MUST NOT BE RELIED UPON AS THE SOLE
+     BASIS FOR ANY DECISION WITH SAFETY-CRITICAL, FINANCIAL, MEDICAL, LEGAL,
+     OR OTHER HIGH-CONSEQUENCE IMPLICATIONS WITHOUT INDEPENDENT VERIFICATION.
+
+     SOME JURISDICTIONS DO NOT ALLOW THE EXCLUSION OF IMPLIED WARRANTIES.  IN
+     SUCH JURISDICTIONS, THE ABOVE EXCLUSIONS SHALL APPLY TO THE MAXIMUM
+     EXTENT PERMITTED BY APPLICABLE LAW.
+
+7.2  LIMITATION OF LIABILITY.
+
+     IN NO EVENT SHALL THE LICENSOR OR ANY CONTRIBUTOR BE LIABLE TO YOU OR ANY
+     THIRD PARTY FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
+     CONSEQUENTIAL, OR PUNITIVE DAMAGES OF ANY KIND, INCLUDING BUT NOT LIMITED
+     TO DAMAGES FOR LOSS OF PROFITS, LOSS OF DATA, LOSS OF GOODWILL, BUSINESS
+     INTERRUPTION, COMPUTER FAILURE OR MALFUNCTION, OR ANY OTHER COMMERCIAL
+     DAMAGES OR LOSSES, ARISING OUT OF OR IN CONNECTION WITH THIS LICENSE, THE
+     USE OR INABILITY TO USE THE SOFTWARE, OR ANY DERIVATIVE WORK, EVEN IF THE
+     LICENSOR OR CONTRIBUTOR HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+     DAMAGES.
+
+     THE FOREGOING LIMITATION SHALL APPLY REGARDLESS OF THE LEGAL THEORY UPON
+     WHICH SUCH DAMAGES ARE SOUGHT, WHETHER IN CONTRACT, TORT (INCLUDING
+     NEGLIGENCE AND STRICT LIABILITY), STATUTORY, OR ANY OTHER LEGAL OR
+     EQUITABLE THEORY.
+
+     IN NO EVENT SHALL THE AGGREGATE LIABILITY OF THE LICENSOR AND ALL
+     CONTRIBUTORS UNDER THIS LICENSE EXCEED THE AMOUNT OF ONE UNITED STATES
+     DOLLAR (USD $1.00).
+
+     SOME JURISDICTIONS DO NOT ALLOW THE LIMITATION OR EXCLUSION OF LIABILITY
+     FOR INCIDENTAL OR CONSEQUENTIAL DAMAGES.  IN SUCH JURISDICTIONS, THE
+     ABOVE LIMITATIONS SHALL APPLY TO THE MAXIMUM EXTENT PERMITTED BY
+     APPLICABLE LAW.
+
+================================================================================
+                         ARTICLE 8 — TERMINATION
+================================================================================
+
+8.1  AUTOMATIC TERMINATION.
+
+     Your rights under this License terminate automatically and without notice
+     if You fail to comply with any term or condition of this License.  Upon
+     termination, You must immediately:
+
+     (a) Cease all use, reproduction, modification, distribution, and Network
+         Use of the Software and all Derivative Works;
+
+     (b) Destroy all copies of the Software and Derivative Works in Your
+         possession or control, including but not limited to copies stored on
+         local storage devices, cloud storage services, backup media, and
+         version control repositories;
+
+     (c) Certify in writing to the Licensor that You have complied with the
+         foregoing obligations.
+
+8.2  REINSTATEMENT.
+
+     (a) If Your rights under this License have been terminated due to a
+         violation, and You cure the violation within thirty (30) calendar days
+         of becoming aware of the violation (or receiving notice from the
+         Licensor, whichever is earlier), Your rights under this License are
+         provisionally reinstated, subject to the Licensor's right to
+         terminate for cause upon reasonable notice.
+
+     (b) If Your rights under this License have been terminated and You have
+         not previously received a notice of violation from the Licensor, and
+         You cure the violation within thirty (30) calendar days of receiving
+         such notice, Your rights under this License are permanently
+         reinstated.
+
+     (c) If Your rights under this License have been terminated for a second
+         or subsequent violation, reinstatement requires the Licensor's
+         explicit written consent.
+
+8.3  SURVIVAL.
+
+     The following provisions survive termination of this License: Article 1
+     (Definitions), Article 5 (Anti-Misappropriation Provisions), Article 7
+     (Disclaimer of Warranty and Limitation of Liability), Article 8
+     (Termination, including this Section), and Article 9 (General Provisions).
+
+================================================================================
+                        ARTICLE 9 — GENERAL PROVISIONS
+================================================================================
+
+9.1  GOVERNING LAW AND JURISDICTION.
+
+     (a) This License shall be governed by and construed in accordance with the
+         laws of the Republic of Turkey, without regard to its conflict of laws
+         principles.
+
+     (b) Any dispute arising out of or in connection with this License shall be
+         submitted to the exclusive jurisdiction of the courts of Istanbul,
+         Republic of Turkey, unless mandatory local law requires adjudication
+         in a different jurisdiction for the specific claim at issue.
+
+     (c) Notwithstanding the foregoing, the Licensor reserves the right to seek
+         injunctive or other equitable relief in any court of competent
+         jurisdiction worldwide to protect the Licensor's intellectual property
+         rights.
+
+     (d) The United Nations Convention on Contracts for the International Sale
+         of Goods (CISG) shall not apply to this License.
+
+9.2  SEVERABILITY.
+
+     If any provision of this License is held to be invalid, illegal, or
+     unenforceable by a court of competent jurisdiction, such provision shall
+     be modified to the minimum extent necessary to make it valid, legal, and
+     enforceable while preserving the original intent.  If such modification is
+     not possible, the provision shall be severed from this License, and the
+     remaining provisions shall continue in full force and effect.
+
+9.3  ENTIRE AGREEMENT.
+
+     This License constitutes the entire agreement between the parties with
+     respect to the subject matter hereof and supersedes all prior and
+     contemporaneous agreements, understandings, negotiations, and discussions,
+     whether oral or written, with respect to such subject matter.
+
+9.4  NO WAIVER.
+
+     The failure of the Licensor to enforce any provision of this License shall
+     not be construed as a waiver of such provision or the right to enforce it
+     at a later time.
+
+9.5  ASSIGNMENT.
+
+     The Licensor may assign or transfer this License and all rights thereunder
+     to any successor or assignee without Your consent.  You may not assign or
+     transfer Your rights under this License without the Licensor's prior
+     written consent.
+
+9.6  NOTICES.
+
+     Any notice required or permitted under this License shall be in writing and
+     shall be delivered by electronic mail to the address designated by the
+     Licensor in the official repository, or by any other means specified by the
+     Licensor.
+
+9.7  LANGUAGE.
+
+     This License is drafted in the English language.  If this License is
+     translated into any other language, the English language version shall
+     prevail in the event of any conflict or ambiguity.
+
+9.8  RELATIONSHIP TO OTHER LICENSES.
+
+     (a) This License is a standalone, independent license.  It is not a
+         modification or extension of the GNU General Public License, the GNU
+         Affero General Public License, the Apache License, or any other
+         existing open-source license.
+
+     (b) This License draws inspiration from concepts found in the GNU Affero
+         General Public License, version 3 (copyleft and network use
+         provisions), the Apache License, version 2.0 (patent grant and
+         retaliation), and the Mozilla Public License, version 2.0 (contributor
+         provisions), but is legally distinct from all of them.
+
+     (c) Works licensed under this License are NOT compatible with works
+         licensed under the GNU General Public License, the GNU Affero General
+         Public License, the Apache License, or any other copyleft license,
+         unless the Licensor provides explicit written permission for
+         combination under specific terms.
+
+9.9  AMENDMENTS.
+
+     The Licensor may publish revised versions of this License from time to
+     time.  Each version will be given a distinguishing version number.  Once
+     the Software has been distributed under a particular version of this
+     License, You may continue to use it under the terms of that version.  The
+     Licensor may also specify that the Software may be used under the terms
+     of any subsequent version of this License published by the Licensor.
+
+9.10 INTERPRETATION.
+
+     (a) The headings in this License are for convenience only and shall not
+         affect its interpretation.
+
+     (b) The word "including" means "including but not limited to" unless
+         expressly stated otherwise.
+
+     (c) The word "must" indicates a mandatory, legally binding obligation.
+         The word "should" indicates a strong recommendation that is not
+         legally binding.  The word "may" indicates a permissive option.
+
+     (d) References to "days" mean calendar days unless expressly stated
+         otherwise.
+
+     (e) All monetary amounts are in United States Dollars (USD) unless
+         expressly stated otherwise.
+
+================================================================================
+                        ARTICLE 10 — CONTRIBUTOR AGREEMENT
+================================================================================
+
+10.1 INBOUND LICENSE.
+
+     By submitting a Contribution to the Software, You:
+
+     (a) Represent and warrant that You are the sole author of the Contribution
+         and have full legal authority to grant the rights described herein, or
+         that You have obtained all necessary permissions from all authors and
+         rights holders;
+
+     (b) Grant to the Licensor a perpetual, worldwide, non-exclusive,
+         royalty-free, irrevocable license (with the right to sublicense) under
+         all copyrights, patent claims, and other intellectual property rights
+         in the Contribution, to use, reproduce, modify, display, perform,
+         distribute, and sublicense the Contribution as part of the Software;
+
+     (c) Agree that the Contribution shall be distributed under the terms of
+         this License;
+
+     (d) Understand and agree that Your Contribution is public and that a record
+         of the Contribution (including Your name, email address, and the
+         content of the Contribution) shall be maintained indefinitely in the
+         Software's version history;
+
+     (e) Agree that the Licensor has no obligation to use, incorporate, or
+         maintain Your Contribution.
+
+10.2 MORAL RIGHTS.
+
+     To the extent permitted by applicable law, You waive or agree not to
+     assert any moral rights (including rights of attribution and integrity)
+     in Your Contribution, except for the right to be identified as a
+     Contributor.  In jurisdictions where moral rights cannot be waived (such
+     as Turkey under FSEK Article 14-17, Germany under UrhG Section 12-14,
+     and France under CPI Article L121-1), You agree to exercise such rights
+     in a manner consistent with the purposes of this License.
+
+================================================================================
+                          END OF LICENSE TERMS
+================================================================================
+
+For questions about this License, contact the Licensor at the address specified
+in the official repository.
+
+To report a License violation, submit a detailed report to the Licensor
+including: (a) identification of the infringing work, (b) description of the
+violation, (c) evidence of the violation, and (d) Your contact information.
+
+This License is Copyright (c) 2026 Faruk Alpay.  Permission is granted to
+copy and distribute verbatim copies of this License document, but modification
+of this License document is not permitted.

@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "spectral-packet-engine": {
+      "command": "python3",
+      "args": [
+        "-m", "spectral_packet_engine",
+        "serve-mcp",
+        "--max-concurrent-tasks", "2",
+        "--log-level", "warning"
+      ],
+      "env": {
+        "PYTHONPATH": "src"
+      },
+      "metadata": {
+        "name": "Spectral Packet Engine",
+        "description": "Bounded-domain spectral computation: packet simulation, modal analysis, profile compression, inverse reconstruction, spectral feature export, load modeling, adaptive throttling, and SQL-backed data workflows."
+      }
+    }
+  }
+}

@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def test_mcp_module_entrypoint_help_is_available_from_source_checkout() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "spectral_packet_engine.mcp", "--help"],
+        cwd=_repo_root(),
+        env={**os.environ, "PYTHONPATH": "src"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "--max-concurrent-tasks" in completed.stdout
+    assert "--allow-unsafe-python" in completed.stdout
+
+
+def test_mcp_client_config_and_service_plan_are_explicit() -> None:
+    from spectral_packet_engine.mcp_deployment import (
+        build_local_mcp_client_configuration,
+        build_mcp_service_install_plan,
+    )
+
+    root = _repo_root()
+    config = build_local_mcp_client_configuration(
+        working_directory=root,
+        python_executable="python3",
+        source_checkout=True,
+    ).to_dict()
+    assert config["mcpServers"]["spectral-packet-engine"]["command"] == "python3"
+    assert config["mcpServers"]["spectral-packet-engine"]["args"][:3] == ["-m", "spectral_packet_engine", "serve-mcp"]
+    assert config["mcpServers"]["spectral-packet-engine"]["env"]["PYTHONPATH"] == "src"
+
+    linux_plan = build_mcp_service_install_plan(
+        working_directory=root,
+        python_executable="python3",
+        source_checkout=True,
+        platform_name="linux",
+        scratch_directory=root / "tmp_scratch",
+    )
+    assert linux_plan.restart_policy == "always"
+    assert "Restart=always" in linux_plan.manifest
+    assert 'Environment="PYTHONPATH=src"' in linux_plan.manifest
+    assert "--transport streamable-http" in linux_plan.manifest
+    assert "--scratch-dir" in linux_plan.manifest
+    assert linux_plan.endpoint_url.startswith("http://127.0.0.1:")
+
+    macos_plan = build_mcp_service_install_plan(
+        working_directory=root,
+        python_executable="python3",
+        source_checkout=True,
+        platform_name="macos",
+    )
+    assert "<key>KeepAlive</key>" in macos_plan.manifest
+    assert "<key>PYTHONPATH</key>" in macos_plan.manifest
+    assert macos_plan.enable_commands[0][1] == "bootout"
+    assert macos_plan.enable_commands[1][1] == "bootstrap"
+
+
+def test_execute_python_is_disabled_by_default_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool("execute_python", {"code": "result = 1"})
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["error"] is True
+    assert payload["error_type"] == "PermissionError"
+
+
+def test_managed_scratch_tools_reject_path_traversal_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, create_payload = await server.call_tool("create_scratch_database", {"name": "../escape"})
+        _, generate_payload = await server.call_tool(
+            "generate_synthetic_profiles",
+            {"output_name": "../escape_profiles", "num_profiles": 2, "grid_points": 8},
+        )
+        return create_payload, generate_payload
+
+    create_payload, generate_payload = __import__("asyncio").run(_call())
+    assert create_payload["error"] is True
+    assert create_payload["error_type"] == "ValueError"
+    assert generate_payload["error"] is True
+    assert generate_payload["error_type"] == "ValueError"
+
+
+def test_execute_python_can_be_enabled_explicitly_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+    async def _call():
+        server = create_mcp_server(MCPServerConfig(allow_unsafe_python=True))
+        _, payload = await server.call_tool("execute_python", {"code": "result = 7"})
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["result"] == 7
+
+
+def test_synthetic_profile_generator_round_trips(tmp_path) -> None:
+    import numpy as np
+
+    from spectral_packet_engine.synthetic_profiles import generate_synthetic_profile_table
+    from spectral_packet_engine.table_io import load_profile_table, save_profile_table_csv
+
+    table = generate_synthetic_profile_table(num_profiles=4, grid_points=16, device="cpu")
+    assert np.isfinite(table.profiles).all()
+
+    output_path = tmp_path / "test_synthetic_roundtrip.csv"
+    save_profile_table_csv(table, output_path)
+    loaded = load_profile_table(output_path)
+    assert loaded.profiles.shape == (4, 16)
+
+
+def test_probe_suite_runs_against_local_stdio_server_when_available(tmp_path) -> None:
+    pytest.importorskip("mcp.client.stdio")
+
+    from spectral_packet_engine.mcp_probe import (
+        build_local_probe_server_spec,
+        run_mcp_probe_suite,
+        write_mcp_probe_artifacts,
+    )
+
+    report = run_mcp_probe_suite(
+        build_local_probe_server_spec(
+            working_directory=_repo_root(),
+            python_executable="python3",
+            source_checkout=True,
+            log_file=tmp_path / "server.log",
+        ),
+        expect_unsafe_python_enabled=False,
+    )
+    assert report.summary["failed_count"] == 0
+    assert report.summary["probe_count"] >= 6
+    assert report.profile == "smoke"
+    assert any(probe.probe_id == "EXEC-001" and probe.passed for probe in report.probes)
+    assert any(probe.probe_id == "DATA-001" and probe.passed for probe in report.probes)
+    assert any(probe.probe_id == "SELF-001" and probe.passed for probe in report.probes)
+
+    output_dir = write_mcp_probe_artifacts(report, tmp_path / "probe_artifacts")
+    assert (output_dir / "mcp_probe_report.json").exists()
+    assert (output_dir / "mcp_tool_calls.jsonl").exists()
+    assert (output_dir / "artifacts.json").exists()
+
+
+def test_server_info_reports_bind_facts_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool("server_info", {})
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["transport"] == "stdio"
+    assert payload["bind_host"] == "127.0.0.1"
+    assert "network_note" in payload
+
+
+def test_high_level_physics_pipeline_and_nested_probe_run_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, potential_payload = await server.call_tool(
+            "analyze_potential_pipeline",
+            {"potential": "double_well", "num_points": 64, "temperature": 5.0, "device": "cpu"},
+        )
+        _, tunneling_payload = await server.call_tool(
+            "tunneling_experiment",
+            {
+                "barrier_height": 20.0,
+                "barrier_width_sigma": 0.03,
+                "grid_points": 96,
+                "num_modes": 48,
+                "num_energies": 48,
+                "propagation_steps": 48,
+                "dt": 1e-5,
+                "device": "cpu",
+            },
+        )
+        _, probe_payload = await server.call_tool("probe_mcp_runtime", {"profile": "smoke"})
+        return potential_payload, tunneling_payload, probe_payload
+
+    potential_payload, tunneling_payload, probe_payload = __import__("asyncio").run(_call())
+    assert potential_payload["potential_name"] == "double_well"
+    assert tunneling_payload["num_modes"] == 48
+    assert "packet_mean_energy" in tunneling_payload["scattering"]
+    assert "transmitted_probability" in tunneling_payload["propagation"]
+    assert probe_payload["summary"]["failed_count"] == 0
