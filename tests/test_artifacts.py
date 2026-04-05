@@ -11,6 +11,7 @@ from spectral_packet_engine import (
     ProfileTable,
     TabularDataset,
     build_profile_table_report,
+    build_separable_2d_report,
     calibrate_potential_from_spectrum,
     design_potential_for_target_transition,
     export_feature_table_from_profile_table,
@@ -294,7 +295,32 @@ def test_potential_inference_and_reduced_model_artifacts_follow_shared_bundle_co
     assert reduced_report.complete is True
     assert "reduced_model_summary.json" in reduced_report.files
     assert "combined_spectrum.csv" in reduced_report.files
+    assert "mode_budget.json" in reduced_report.files
+    assert "structured_operator.json" in reduced_report.files
     assert reduced_report.metadata["workflow"] == "reduced-model"
+
+    separable_report = build_separable_2d_report(
+        num_modes_x=4,
+        num_modes_y=4,
+        num_combined_states=6,
+        grid_points_x=32,
+        grid_points_y=32,
+        device="cpu",
+    )
+    separable_report_dir = tmp_path / "separable_2d_report"
+    write_reduced_model_artifacts(separable_report_dir, separable_report)
+    separable_directory = inspect_artifact_directory(separable_report_dir)
+    mode_budget_payload = json.loads((separable_report_dir / "mode_budget.json").read_text(encoding="utf-8"))
+
+    assert separable_directory.complete is True
+    assert "separable_2d_report.json" in separable_directory.files
+    assert "separable_2d_summary.json" in separable_directory.files
+    assert "eigenvalues.csv" in separable_directory.files
+    assert "mode_budget.json" in separable_directory.files
+    assert "tensor_basis.json" in separable_directory.files
+    assert separable_directory.metadata["workflow"] == "separable-2d-report"
+    assert separable_directory.metadata["example_name"] == "box-plus-box"
+    assert mode_budget_payload["total_tensor_mode_count"] == 16
 
 
 def test_differentiable_and_vertical_artifacts_follow_shared_bundle_contract(tmp_path) -> None:

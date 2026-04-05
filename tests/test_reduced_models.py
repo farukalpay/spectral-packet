@@ -6,11 +6,12 @@ import torch
 from spectral_packet_engine import (
     analyze_coupled_channel_surfaces,
     analyze_separable_tensor_product_spectrum,
+    build_separable_2d_report,
     solve_radial_reduction,
 )
 
 
-def test_separable_tensor_product_spectrum_reports_rank_one_ground_density() -> None:
+def test_separable_tensor_product_spectrum_reports_structured_basis_budget_and_operator() -> None:
     summary = analyze_separable_tensor_product_spectrum(
         family_x="harmonic",
         parameters_x={"omega": 10.0},
@@ -27,10 +28,39 @@ def test_separable_tensor_product_spectrum_reports_rank_one_ground_density() -> 
 
     assert summary.family_x == "harmonic"
     assert summary.family_y == "harmonic"
+    assert summary.basis.tensor_shape == (4, 4)
+    assert summary.mode_budget.total_tensor_mode_count == 16
+    assert summary.mode_budget.retained_combined_state_count == 6
+    assert summary.truncation.combined_state_truncation_applied is True
+    assert summary.operator.kind == "kronecker-sum"
+    assert summary.operator.coupling_kind == "none"
     assert tuple(summary.combined_eigenvalues.shape) == (6,)
     assert summary.ground_density_low_rank.retained_rank == 1
     assert summary.ground_density_low_rank.reconstruction_error < 1e-8
     assert torch.all(summary.transition_energies_from_ground >= 0)
+
+
+def test_separable_2d_report_matches_closed_form_box_reference() -> None:
+    report = build_separable_2d_report(
+        num_modes_x=4,
+        num_modes_y=5,
+        num_combined_states=7,
+        grid_points_x=32,
+        grid_points_y=36,
+        device="cpu",
+    )
+
+    assert report.overview.example_name == "box-plus-box"
+    assert report.overview.axis_models == ("infinite-well", "infinite-well")
+    assert report.overview.tensor_shape == (4, 5)
+    assert report.overview.retained_combined_state_count == 7
+    assert report.overview.max_absolute_reference_error < 1e-10
+    torch.testing.assert_close(
+        report.absolute_error_to_reference,
+        torch.zeros_like(report.absolute_error_to_reference),
+        atol=1e-10,
+        rtol=1e-10,
+    )
 
 
 def test_coupled_channel_surface_summary_exposes_gap_and_derivative_couplings() -> None:

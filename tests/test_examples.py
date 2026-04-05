@@ -133,3 +133,33 @@ def test_inverse_physics_example_runs_and_writes_vertical_artifacts(tmp_path) ->
     assert artifact_report["complete"] is True
     assert "family_inference/artifacts.json" in artifact_report["files"]
     assert "observed_transitions.csv" in artifact_report["files"]
+
+
+def test_reduced_model_example_runs_and_writes_structured_2d_artifacts(tmp_path) -> None:
+    output_dir = tmp_path / "reduced_model"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/reduced_model_workflow.py",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+        ],
+        cwd=_repo_root(),
+        env={**os.environ, "PYTHONPATH": "src"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) >= 3
+    overview = json.loads(lines[0])
+    artifact_report = json.loads(lines[1])
+
+    assert overview["example_name"] == "box-plus-box"
+    assert artifact_report["complete"] is True
+    assert "separable_2d_report.json" in artifact_report["files"]
+    assert "eigenvalues.csv" in artifact_report["files"]
+    assert "mode_budget.json" in artifact_report["files"]

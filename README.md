@@ -27,6 +27,7 @@ This upgrade extends that core in four focused directions:
    - explicit potential-family inference from observed spectra.
 2. Controlled reduced models beyond plain 1D
    - separable tensor-product spectra,
+   - phase-1 structured dimensional lift for separable 2D bounded problems,
    - reduced coupled-channel surfaces,
    - radial effective-coordinate reductions,
    - structured low-rank summaries.
@@ -123,7 +124,7 @@ print(summary.family_weights)
 ### Reduced-model analysis
 
 ```python
-from spectral_packet_engine import analyze_separable_tensor_product_spectrum
+from spectral_packet_engine import analyze_separable_tensor_product_spectrum, build_separable_2d_report
 
 summary = analyze_separable_tensor_product_spectrum(
     family_x="harmonic",
@@ -135,6 +136,17 @@ summary = analyze_separable_tensor_product_spectrum(
 
 print(summary.combined_eigenvalues[:4])
 print(summary.ground_density_low_rank.energy_capture)
+
+report = build_separable_2d_report(
+    num_modes_x=4,
+    num_modes_y=4,
+    num_combined_states=6,
+    device="cpu",
+)
+report.write_artifacts("artifacts/separable_2d_report")
+
+print(report.overview.example_name)
+print(report.overview.max_absolute_reference_error)
 ```
 
 ### Differentiable inverse design
@@ -245,6 +257,11 @@ New bundle patterns include:
 - reduced models:
   - `reduced_model_summary.json`
   - `combined_spectrum.csv`
+  - `separable_2d_report.json`
+  - `separable_2d_summary.json`
+  - `eigenvalues.csv`
+  - `mode_budget.json`
+  - `structured_operator.json`
   - `adiabatic_surfaces.csv`
   - `effective_potential.csv`
 - differentiable design:
@@ -313,5 +330,6 @@ The repository is explicit about what it does not claim:
 
 - local posterior approximations are not global Bayesian inference,
 - reduced models are structured reductions, not arbitrary 2D/3D solvers,
+- phase-1 structured dimensional lift is a separable 2D tensor-product path with explicit budgets and truncation, not a generic multidimensional PDE stack,
 - differentiable workflows optimize explicit parameterizations, not unrestricted control spaces,
 - vertical workflows are productized orchestrations over the same spectral core, not separate subsystems.

@@ -7,20 +7,35 @@ capabilities. It implements restricted, inspectable reductions that preserve
 the repository's spectral center of gravity:
 
 - separable tensor-product spectra from independent 1D axes,
+- a phase-1 structured dimensional lift for separable 2D bounded problems,
 - coupled-channel adiabatic surface analysis for avoided crossings,
 - radial effective-coordinate reductions,
 - low-rank matrix approximations for structured coefficient objects.
 """
 
 from dataclasses import dataclass
-from typing import Mapping
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import torch
 
 from spectral_packet_engine.domain import InfiniteWell1D
 from spectral_packet_engine.eigensolver import solve_eigenproblem
 from spectral_packet_engine.parametric_potentials import resolve_potential_family
-from spectral_packet_engine.runtime import inspect_torch_runtime
+from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime
+from spectral_packet_engine.tensor_product import (
+    KroneckerSumOperator2D,
+    TensorAxisModes,
+    TensorModeBudget2D,
+    TensorProductBasis2D,
+    TensorProductBasisSummary2D,
+    TensorTruncationDiagnostics2D,
+    build_tensor_mode_budget_2d,
+    make_infinite_well_axis_modes,
+    make_tensor_axis_modes,
+    summarize_tensor_product_basis_2d,
+    summarize_tensor_truncation_2d,
+)
 
 Tensor = torch.Tensor
 
@@ -37,12 +52,26 @@ class LowRankFactorizationSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuredOperatorSummary:
+    kind: str
+    tensor_shape: tuple[int, int]
+    matrix_shape: tuple[int, int]
+    coupling_kind: str
+    coupling_nonzero_count: int
+    diagonal_coupling_l2_norm: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class SeparableSpectrumSummary:
     family_x: str
     family_y: str
     parameters_x: dict[str, float]
     parameters_y: dict[str, float]
     domain_lengths: tuple[float, float]
+    basis: TensorProductBasisSummary2D
+    mode_budget: TensorModeBudget2D
+    truncation: TensorTruncationDiagnostics2D
+    operator: StructuredOperatorSummary
     axis_eigenvalues_x: Tensor
     axis_eigenvalues_y: Tensor
     combined_eigenvalues: Tensor
@@ -50,6 +79,41 @@ class SeparableSpectrumSummary:
     transition_energies_from_ground: Tensor
     ground_density_low_rank: LowRankFactorizationSummary
     assumptions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Separable2DReportOverview:
+    example_name: str
+    axis_models: tuple[str, str]
+    domain_lengths: tuple[float, float]
+    tensor_shape: tuple[int, int]
+    total_tensor_modes: int
+    retained_combined_state_count: int
+    retained_energy_ceiling: float | None
+    analytic_reference: str
+    coupling_kind: str
+    max_absolute_reference_error: float
+
+
+@dataclass(frozen=True, slots=True)
+class Separable2DReport:
+    runtime: TorchRuntime
+    overview: Separable2DReportOverview
+    spectrum: SeparableSpectrumSummary
+    analytic_reference_eigenvalues: Tensor
+    absolute_error_to_reference: Tensor
+    assumptions: tuple[str, ...]
+
+    def write_artifacts(
+        self,
+        output_dir: str | Path,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ):
+        from spectral_packet_engine.artifacts import inspect_artifact_directory, write_reduced_model_artifacts
+
+        write_reduced_model_artifacts(output_dir, self, metadata=metadata)
+        return inspect_artifact_directory(output_dir)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +182,153 @@ def low_rank_factorize_matrix(
     )
 
 
+def _domain_length_from_interval(interval: tuple[float, float]) -> float:
+    return float(interval[1] - interval[0])
+
+
+def _coerce_coupling_diagonal(
+    coupling_diagonal: Sequence[float] | Tensor | None,
+    *,
+    tensor_shape: tuple[int, int],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Tensor | None:
+    if coupling_diagonal is None:
+        return None
+    coupling = torch.as_tensor(coupling_diagonal, dtype=dtype, device=device)
+    if coupling.ndim == 2:
+        if tuple(coupling.shape) != tensor_shape:
+            raise ValueError("two-dimensional coupling_diagonal must match the tensor basis shape")
+        coupling = coupling.reshape(-1)
+    elif coupling.ndim != 1:
+        raise ValueError("coupling_diagonal must be one- or two-dimensional")
+    if int(coupling.shape[0]) != tensor_shape[0] * tensor_shape[1]:
+        raise ValueError("coupling_diagonal length must match the tensor basis size")
+    return coupling.detach()
+
+
+def _structured_operator_summary(operator: KroneckerSumOperator2D) -> StructuredOperatorSummary:
+    coupling_nonzero_count = 0
+    diagonal_coupling_l2_norm = None
+    if operator.coupling_diagonal is not None:
+        coupling_nonzero_count = int(torch.count_nonzero(operator.coupling_diagonal).item())
+        diagonal_coupling_l2_norm = float(torch.linalg.norm(operator.coupling_diagonal).item())
+    return StructuredOperatorSummary(
+        kind="kronecker-sum",
+        tensor_shape=operator.tensor_shape,
+        matrix_shape=(operator.size, operator.size),
+        coupling_kind=operator.coupling_kind,
+        coupling_nonzero_count=coupling_nonzero_count,
+        diagonal_coupling_l2_norm=diagonal_coupling_l2_norm,
+    )
+
+
+def _make_family_axis_modes(
+    *,
+    axis_name: str,
+    family: str,
+    parameters: Mapping[str, float],
+    domain_length: float,
+    basis_resolution_points: int,
+    requested_mode_count: int,
+    runtime: TorchRuntime,
+) -> tuple[str, TensorAxisModes]:
+    domain = InfiniteWell1D.from_length(
+        domain_length,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    family_def = resolve_potential_family(family)
+    result = solve_eigenproblem(
+        family_def.build_from_mapping(domain, parameters),
+        domain,
+        num_points=basis_resolution_points,
+        num_states=requested_mode_count,
+    )
+    return (
+        family_def.name,
+        make_tensor_axis_modes(
+            axis_name,
+            kind="parametric-family",
+            requested_mode_count=requested_mode_count,
+            basis_resolution_points=basis_resolution_points,
+            domain_interval=(float(domain.left), float(domain.right)),
+            grid=result.grid.detach(),
+            eigenvalues=result.eigenvalues.detach(),
+            eigenstates=result.eigenstates.detach(),
+        ),
+    )
+
+
+def _build_separable_spectrum_summary(
+    *,
+    family_x: str,
+    parameters_x: Mapping[str, float],
+    axis_x: TensorAxisModes,
+    family_y: str,
+    parameters_y: Mapping[str, float],
+    axis_y: TensorAxisModes,
+    num_combined_states: int,
+    low_rank_rank: int,
+    coupling_diagonal: Sequence[float] | Tensor | None = None,
+    assumptions: tuple[str, ...],
+) -> SeparableSpectrumSummary:
+    if num_combined_states <= 0:
+        raise ValueError("num_combined_states must be positive")
+
+    basis = TensorProductBasis2D(axis_x=axis_x, axis_y=axis_y)
+    coupling = _coerce_coupling_diagonal(
+        coupling_diagonal,
+        tensor_shape=basis.shape,
+        dtype=axis_x.eigenvalues.dtype,
+        device=axis_x.eigenvalues.device,
+    )
+    operator = KroneckerSumOperator2D(
+        axis_energies_x=axis_x.eigenvalues,
+        axis_energies_y=axis_y.eigenvalues,
+        coupling_diagonal=coupling,
+    )
+    sorted_full_spectrum = torch.sort(operator.diagonal_entries())[0]
+    keep = min(int(num_combined_states), int(sorted_full_spectrum.shape[0]))
+    combined_eigenvalues, state_index_pairs = operator.lowest_states(keep)
+    transition_energies = (
+        combined_eigenvalues[1:] - combined_eigenvalues[0]
+        if keep > 1
+        else torch.empty(0, dtype=combined_eigenvalues.dtype, device=combined_eigenvalues.device)
+    )
+    ground_density = basis.ground_density()
+
+    return SeparableSpectrumSummary(
+        family_x=family_x,
+        family_y=family_y,
+        parameters_x={name: float(value) for name, value in parameters_x.items()},
+        parameters_y={name: float(value) for name, value in parameters_y.items()},
+        domain_lengths=(
+            _domain_length_from_interval(axis_x.domain_interval),
+            _domain_length_from_interval(axis_y.domain_interval),
+        ),
+        basis=summarize_tensor_product_basis_2d(basis),
+        mode_budget=build_tensor_mode_budget_2d(
+            basis,
+            requested_combined_state_count=num_combined_states,
+            retained_combined_state_count=keep,
+        ),
+        truncation=summarize_tensor_truncation_2d(
+            basis,
+            retained_combined_state_count=keep,
+            sorted_diagonal=sorted_full_spectrum,
+        ),
+        operator=_structured_operator_summary(operator),
+        axis_eigenvalues_x=axis_x.eigenvalues.detach(),
+        axis_eigenvalues_y=axis_y.eigenvalues.detach(),
+        combined_eigenvalues=combined_eigenvalues.detach(),
+        state_index_pairs=state_index_pairs,
+        transition_energies_from_ground=transition_energies.detach(),
+        ground_density_low_rank=low_rank_factorize_matrix(ground_density, rank=low_rank_rank),
+        assumptions=assumptions,
+    )
+
+
 def analyze_separable_tensor_product_spectrum(
     *,
     family_x: str,
@@ -132,61 +343,159 @@ def analyze_separable_tensor_product_spectrum(
     num_states_y: int = 6,
     num_combined_states: int = 12,
     low_rank_rank: int = 1,
+    coupling_diagonal: Sequence[float] | Tensor | None = None,
     device: str | torch.device = "auto",
 ) -> SeparableSpectrumSummary:
     runtime = inspect_torch_runtime(device)
-    domain_x = InfiniteWell1D.from_length(domain_length_x, dtype=runtime.preferred_real_dtype, device=runtime.device)
-    domain_y = InfiniteWell1D.from_length(domain_length_y, dtype=runtime.preferred_real_dtype, device=runtime.device)
-    family_def_x = resolve_potential_family(family_x)
-    family_def_y = resolve_potential_family(family_y)
-
-    result_x = solve_eigenproblem(
-        family_def_x.build_from_mapping(domain_x, parameters_x),
-        domain_x,
-        num_points=num_points_x,
-        num_states=num_states_x,
+    resolved_family_x, axis_x = _make_family_axis_modes(
+        axis_name="x",
+        family=family_x,
+        parameters=parameters_x,
+        domain_length=domain_length_x,
+        basis_resolution_points=num_points_x,
+        requested_mode_count=num_states_x,
+        runtime=runtime,
     )
-    result_y = solve_eigenproblem(
-        family_def_y.build_from_mapping(domain_y, parameters_y),
-        domain_y,
-        num_points=num_points_y,
-        num_states=num_states_y,
+    resolved_family_y, axis_y = _make_family_axis_modes(
+        axis_name="y",
+        family=family_y,
+        parameters=parameters_y,
+        domain_length=domain_length_y,
+        basis_resolution_points=num_points_y,
+        requested_mode_count=num_states_y,
+        runtime=runtime,
     )
-
-    combined_grid = result_x.eigenvalues[:, None] + result_y.eigenvalues[None, :]
-    flat = combined_grid.reshape(-1)
-    sorted_values, sorted_indices = torch.sort(flat)
-    keep = min(int(num_combined_states), int(sorted_values.shape[0]))
-    sorted_values = sorted_values[:keep]
-    sorted_indices = sorted_indices[:keep]
-    index_pairs = tuple(
-        (
-            int(index.item() // result_y.eigenvalues.shape[0]),
-            int(index.item() % result_y.eigenvalues.shape[0]),
-        )
-        for index in sorted_indices
+    coupling_assumption = (
+        "A diagonal retained-basis coupling is included explicitly and reported in the structured operator summary."
+        if coupling_diagonal is not None
+        else "No retained-basis coupling is applied beyond the Kronecker-sum separable operator."
     )
-
-    transition_energies = sorted_values[1:] - sorted_values[0] if keep > 1 else torch.empty(0, dtype=sorted_values.dtype)
-    ground_density = torch.outer(result_x.eigenstates[0] ** 2, result_y.eigenstates[0] ** 2)
-    low_rank = low_rank_factorize_matrix(ground_density, rank=low_rank_rank)
-
-    return SeparableSpectrumSummary(
-        family_x=family_def_x.name,
-        family_y=family_def_y.name,
-        parameters_x={name: float(value) for name, value in parameters_x.items()},
-        parameters_y={name: float(value) for name, value in parameters_y.items()},
-        domain_lengths=(float(domain_x.length), float(domain_y.length)),
-        axis_eigenvalues_x=result_x.eigenvalues.detach(),
-        axis_eigenvalues_y=result_y.eigenvalues.detach(),
-        combined_eigenvalues=sorted_values.detach(),
-        state_index_pairs=index_pairs,
-        transition_energies_from_ground=transition_energies.detach(),
-        ground_density_low_rank=low_rank,
+    return _build_separable_spectrum_summary(
+        family_x=resolved_family_x,
+        parameters_x=parameters_x,
+        axis_x=axis_x,
+        family_y=resolved_family_y,
+        parameters_y=parameters_y,
+        axis_y=axis_y,
+        num_combined_states=num_combined_states,
+        low_rank_rank=low_rank_rank,
+        coupling_diagonal=coupling_diagonal,
         assumptions=(
-            "The total Hamiltonian is assumed separable into independent x and y 1D components.",
-            "The reported combined spectrum is the Kronecker-sum spectrum Ex_i + Ey_j of those axis problems.",
-            "The low-rank summary applies to the separable ground-state density on the tensor grid, not to a general non-separable 2D state.",
+            "The total Hamiltonian is represented on a retained 2D tensor-product basis with x-major/y-minor indexing.",
+            "The structured operator is Hx ⊗ I + I ⊗ Hy on the retained modal axes, not a generic dense 2D discretization.",
+            coupling_assumption,
+            "The low-rank summary applies to the separable ground-state density on the reported tensor grid, not to a general non-separable 2D state.",
+        ),
+    )
+
+
+def _box_reference_eigenvalues(
+    *,
+    domain_length_x: float,
+    domain_length_y: float,
+    num_modes_x: int,
+    num_modes_y: int,
+    num_combined_states: int,
+    mass: float,
+    hbar: float,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Tensor:
+    mode_x = torch.arange(1, num_modes_x + 1, dtype=dtype, device=device)
+    mode_y = torch.arange(1, num_modes_y + 1, dtype=dtype, device=device)
+    prefactor = (torch.pi**2 * (hbar**2)) / (2.0 * mass)
+    spectrum = prefactor * (
+        (mode_x[:, None] ** 2) / (domain_length_x**2)
+        + (mode_y[None, :] ** 2) / (domain_length_y**2)
+    )
+    sorted_values = torch.sort(spectrum.reshape(-1))[0]
+    return sorted_values[: min(int(num_combined_states), int(sorted_values.shape[0]))].detach()
+
+
+def build_separable_2d_report(
+    *,
+    domain_length_x: float = 1.0,
+    domain_length_y: float = 1.0,
+    num_modes_x: int = 6,
+    num_modes_y: int = 6,
+    grid_points_x: int = 96,
+    grid_points_y: int = 96,
+    num_combined_states: int = 12,
+    low_rank_rank: int = 1,
+    mass: float = 1.0,
+    hbar: float = 1.0,
+    device: str | torch.device = "auto",
+) -> Separable2DReport:
+    runtime = inspect_torch_runtime(device)
+    axis_x = make_infinite_well_axis_modes(
+        "x",
+        domain_length=domain_length_x,
+        num_modes=num_modes_x,
+        evaluation_grid_points=grid_points_x,
+        mass=mass,
+        hbar=hbar,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    axis_y = make_infinite_well_axis_modes(
+        "y",
+        domain_length=domain_length_y,
+        num_modes=num_modes_y,
+        evaluation_grid_points=grid_points_y,
+        mass=mass,
+        hbar=hbar,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    spectrum = _build_separable_spectrum_summary(
+        family_x="infinite-well",
+        parameters_x={},
+        axis_x=axis_x,
+        family_y="infinite-well",
+        parameters_y={},
+        axis_y=axis_y,
+        num_combined_states=num_combined_states,
+        low_rank_rank=low_rank_rank,
+        assumptions=(
+            "This report is a phase-1 structured dimensional lift for the separable box-plus-box problem on a bounded domain.",
+            "Each axis is an explicit retained 1D infinite-well modal basis; no arbitrary geometry or mesh layer is introduced.",
+            "The report validates a separable 2D additive spectrum against the closed-form box-plus-box reference on the same retained mode budget.",
+        ),
+    )
+    analytic_reference = _box_reference_eigenvalues(
+        domain_length_x=domain_length_x,
+        domain_length_y=domain_length_y,
+        num_modes_x=spectrum.basis.tensor_shape[0],
+        num_modes_y=spectrum.basis.tensor_shape[1],
+        num_combined_states=spectrum.mode_budget.retained_combined_state_count,
+        mass=mass,
+        hbar=hbar,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    absolute_error = torch.abs(spectrum.combined_eigenvalues - analytic_reference)
+    retained_energy_ceiling = spectrum.truncation.retained_energy_ceiling
+    return Separable2DReport(
+        runtime=runtime,
+        overview=Separable2DReportOverview(
+            example_name="box-plus-box",
+            axis_models=spectrum.basis.axis_kinds,
+            domain_lengths=spectrum.domain_lengths,
+            tensor_shape=spectrum.basis.tensor_shape,
+            total_tensor_modes=spectrum.mode_budget.total_tensor_mode_count,
+            retained_combined_state_count=spectrum.mode_budget.retained_combined_state_count,
+            retained_energy_ceiling=retained_energy_ceiling,
+            analytic_reference="closed-form additive box-plus-box spectrum on the retained mode budget",
+            coupling_kind=spectrum.operator.coupling_kind,
+            max_absolute_reference_error=float(torch.max(absolute_error).item()) if absolute_error.numel() else 0.0,
+        ),
+        spectrum=spectrum,
+        analytic_reference_eigenvalues=analytic_reference.detach(),
+        absolute_error_to_reference=absolute_error.detach(),
+        assumptions=(
+            "This workflow is intentionally narrow: it reports one separable 2D bounded-domain path rather than a generic multidimensional solver.",
+            "Artifact outputs expose the retained tensor basis, mode budget, structured operator contract, and truncation cutoff explicitly.",
+            "The example is box-plus-box because it is analytically interpretable and deterministic within the bounded-domain product identity.",
         ),
     )
 
@@ -311,9 +620,13 @@ __all__ = [
     "CoupledChannelSurfaceSummary",
     "LowRankFactorizationSummary",
     "RadialReductionSummary",
+    "Separable2DReport",
+    "Separable2DReportOverview",
     "SeparableSpectrumSummary",
+    "StructuredOperatorSummary",
     "analyze_coupled_channel_surfaces",
     "analyze_separable_tensor_product_spectrum",
+    "build_separable_2d_report",
     "low_rank_factorize_matrix",
     "solve_radial_reduction",
 ]
