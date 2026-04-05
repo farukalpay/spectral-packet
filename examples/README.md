@@ -6,6 +6,8 @@ Install the package first, then choose the example surface that matches what you
 
 - `core_engine_workflow.py`: direct Python engine workflow with forward artifacts and modal projection output
 - `profile_table_workflow.py`: the hero Python-first profile-table report workflow with inspectable artifacts
+- `inverse_physics_workflow.py`: spectroscopy-style potential-family inference with uncertainty-aware artifact output
+- `reduced_model_workflow.py`: separable-spectrum and coupled-surface reduced-model examples
 - `modal_surrogate_workflow.py`: backend-aware modal-surrogate evaluation over a profile table
 - `api_workflow.py`: minimal HTTP client for the same profile-table report workflow exposed through the optional API
 

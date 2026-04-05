@@ -101,6 +101,10 @@ Important runtime rule: `execute_python` is disabled by default. Only use the ex
 | --- | --- |
 | Environment & Status | `inspect_product`, `inspect_environment`, `validate_installation`, `self_test`, `server_info`, `probe_mcp_runtime` |
 | Profile Table Workflows | `profile_table_report`, `compress_profile_table`, `fit_packet_to_profile_table` |
+| Inverse / UQ | `infer_potential_spectrum`, `fit_packet_to_profile_table`, `fit_packet_to_database_profile_query` |
+| Reduced Models | `analyze_separable_spectrum`, `analyze_coupled_surfaces`, `solve_radial_reduction` |
+| Differentiable Physics | `design_transition`, `optimize_packet_control` |
+| Vertical Workflows | `transport_workflow`, `profile_inference_workflow` |
 | SQL-Backed Workflows | `bootstrap_database`, `query_database`, `execute_database_script`, `report_database_profile_query` |
 | Spectral Feature & Tree | `export_feature_table`, `train_tree_model`, `tune_tree_model` |
 | Analysis Pipelines | `analyze_quantum_state_pipeline`, `analyze_potential_pipeline`, `analyze_scattering_pipeline` |
@@ -143,6 +147,18 @@ This gives the agent a complete onboarding in three tool calls.
 1. `scattering_analysis` with double barrier segments
 2. `wkb_analysis` on the same barrier shape
 3. Compares exact transfer-matrix T(E) with WKB approximation
+
+### Session 3b: Spectroscopy And Family Inference
+
+**Prompt:**
+
+> I observed the low-lying spectrum `[5.22, 15.83, 26.41]`. Use the explicit spectral inverse tools to decide whether a harmonic or double-well family explains it better, and tell me how confident that ranking is.
+
+**What the agent does:**
+
+1. Optionally reads `spectral://capabilities/inverse-uq`
+2. Calls `infer_potential_spectrum`
+3. Returns the family ranking, best family, parameter posterior, and sensitivity summary
 
 ### Session 4: Custom Python Analysis via MCP (Trusted Opt-In)
 
@@ -208,6 +224,18 @@ result = {
 2. `export_feature_table_from_sql` on the scratch database
 3. `train_tree_model` with `target_column="moment_mean"`, `library="sklearn"`
 4. Returns R-squared, feature importances
+
+### Session 6b: Report-First Scientific Tabular Inference
+
+**Prompt:**
+
+> I have a profile table and want one coherent answer: spectral report, inverse fit with uncertainty, and modal feature export. Use the product’s report-first vertical workflow instead of chaining three unrelated tools.
+
+**What the agent does:**
+
+1. Calls `profile_inference_workflow`
+2. Returns nested report / inverse / feature outputs
+3. Optionally inspects the written artifact bundle with `list_artifacts`
 
 ### Session 7: Berry Phase & Quantum Information
 

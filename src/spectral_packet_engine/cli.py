@@ -12,13 +12,16 @@ from spectral_packet_engine.artifacts import (
     to_serializable,
     write_compression_artifacts,
     write_compression_sweep_artifacts,
+    write_differentiable_artifacts,
     write_feature_table_artifacts,
     write_forward_artifacts,
     write_inverse_artifacts,
     write_modal_evaluation_artifacts,
     write_modal_training_artifacts,
     write_packet_sweep_artifacts,
+    write_potential_inference_artifacts,
     write_profile_comparison_artifacts,
+    write_reduced_model_artifacts,
     write_spectral_analysis_artifacts,
     write_tree_training_artifacts,
     write_tree_tuning_artifacts,
@@ -26,6 +29,7 @@ from spectral_packet_engine.artifacts import (
     write_tensorflow_evaluation_artifacts,
     write_tensorflow_training_artifacts,
     write_transport_benchmark_artifacts,
+    write_vertical_workflow_artifacts,
 )
 from spectral_packet_engine.mcp_runtime import MCPServerConfig
 from spectral_packet_engine.ml import ModalSurrogateConfig
@@ -46,8 +50,10 @@ from spectral_packet_engine.tabular import load_tabular_dataset
 from spectral_packet_engine.table_io import load_profile_table
 from spectral_packet_engine.tf_surrogate import TensorFlowRegressorConfig
 from spectral_packet_engine.workflows import (
+    analyze_coupled_channel_surfaces,
     analyze_profile_table_spectra,
     analyze_profile_table_from_database_query,
+    analyze_separable_tensor_product_spectrum,
     benchmark_transport_scan,
     build_profile_table_report_from_database_query,
     bootstrap_local_database,
@@ -57,6 +63,7 @@ from spectral_packet_engine.workflows import (
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    design_potential_for_target_transition,
     execute_database_script,
     execute_database_statement,
     evaluate_tensorflow_surrogate_on_profile_table,
@@ -65,6 +72,8 @@ from spectral_packet_engine.workflows import (
     export_feature_table_from_profile_table,
     fit_gaussian_packet_to_profile_table,
     fit_gaussian_packet_to_profile_table_from_database_query,
+    GradientOptimizationConfig,
+    infer_potential_family_from_spectrum,
     inspect_database,
     inspect_environment,
     inspect_ml_backend_support,
@@ -73,9 +82,14 @@ from spectral_packet_engine.workflows import (
     load_tabular_dataset_from_path,
     materialize_database_query,
     materialize_database_query_to_table,
+    optimize_packet_control,
     simulate_packet_sweep,
     project_gaussian_packet,
+    run_profile_inference_workflow,
+    run_spectroscopy_workflow,
+    run_transport_resonance_workflow,
     simulate_gaussian_packet,
+    solve_radial_reduction,
     summarize_profile_table,
     summarize_database_query_result,
     summarize_tabular_dataset,
@@ -112,6 +126,14 @@ def _parse_key_value_items(items: Sequence[str] | None) -> dict[str, str]:
     return values
 
 
+def _parse_float_key_value_items(items: Sequence[str] | None) -> dict[str, float]:
+    parsed = _parse_key_value_items(items)
+    try:
+        return {key: float(value) for key, value in parsed.items()}
+    except ValueError as exc:
+        raise ValueError(f"parameter values must be numeric: {exc}") from exc
+
+
 def _parse_json_object(raw_value: str | None, *, flag_name: str) -> dict[str, object]:
     if raw_value is None:
         return {}
@@ -122,6 +144,22 @@ def _parse_json_object(raw_value: str | None, *, flag_name: str) -> dict[str, ob
     if not isinstance(payload, dict):
         raise ValueError(f"{flag_name} must decode to a JSON object")
     return {str(key): value for key, value in payload.items()}
+
+
+def _coerce_float_mapping(payload: dict[str, object], *, flag_name: str) -> dict[str, float]:
+    try:
+        return {str(key): float(value) for key, value in payload.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{flag_name} must map parameter names to numeric values") from exc
+
+
+def _coerce_nested_float_mapping(payload: dict[str, object], *, flag_name: str) -> dict[str, dict[str, float]]:
+    nested: dict[str, dict[str, float]] = {}
+    for family, value in payload.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"{flag_name} must map family names to JSON objects")
+        nested[str(family)] = _coerce_float_mapping({str(key): item for key, item in value.items()}, flag_name=flag_name)
+    return nested
 
 
 def _add_command_parser(
@@ -426,6 +464,80 @@ def build_parser() -> argparse.ArgumentParser:
     fit_parser.add_argument("--learning-rate", type=float, default=0.05)
     fit_parser.add_argument("--device", default="auto")
     fit_parser.add_argument("--output-dir", type=Path, default=None)
+
+    spectroscopy_parser = _add_command_parser(
+        subparsers,
+        "infer-potential-spectrum",
+        aliases=("spectroscopy-workflow",),
+        help_text="Infer which bounded potential family best explains an observed low-lying spectrum.",
+        description=(
+            "Compare explicit potential families against observed eigenvalues through the shared "
+            "differentiable eigensolver and return a family ranking with local uncertainty summaries."
+        ),
+    )
+    spectroscopy_parser.add_argument("target_eigenvalues", type=float, nargs="+")
+    spectroscopy_parser.add_argument("--family", action="append", default=None, help="Candidate family name. Repeat to compare multiple families.")
+    spectroscopy_parser.add_argument("--initial-guesses", default=None, help="Optional JSON object mapping family -> {parameter: value}.")
+    spectroscopy_parser.add_argument("--domain-length", type=float, default=1.0)
+    spectroscopy_parser.add_argument("--left", type=float, default=0.0)
+    spectroscopy_parser.add_argument("--mass", type=float, default=1.0)
+    spectroscopy_parser.add_argument("--hbar", type=float, default=1.0)
+    spectroscopy_parser.add_argument("--points", type=int, default=128)
+    spectroscopy_parser.add_argument("--steps", type=int, default=200)
+    spectroscopy_parser.add_argument("--learning-rate", type=float, default=0.05)
+    spectroscopy_parser.add_argument("--device", default="auto")
+    spectroscopy_parser.add_argument("--output-dir", type=Path, default=None)
+
+    separable_parser = _add_command_parser(
+        subparsers,
+        "analyze-separable-spectrum",
+        help_text="Analyze a structured separable spectrum from tensor-product 1D components.",
+    )
+    separable_parser.add_argument("--family-x", required=True)
+    separable_parser.add_argument("--params-x", required=True, help="JSON object of x-axis family parameters.")
+    separable_parser.add_argument("--family-y", required=True)
+    separable_parser.add_argument("--params-y", required=True, help="JSON object of y-axis family parameters.")
+    separable_parser.add_argument("--domain-length-x", type=float, default=1.0)
+    separable_parser.add_argument("--domain-length-y", type=float, default=1.0)
+    separable_parser.add_argument("--points-x", type=int, default=96)
+    separable_parser.add_argument("--points-y", type=int, default=96)
+    separable_parser.add_argument("--states-x", type=int, default=6)
+    separable_parser.add_argument("--states-y", type=int, default=6)
+    separable_parser.add_argument("--combined-states", type=int, default=12)
+    separable_parser.add_argument("--low-rank-rank", type=int, default=1)
+    separable_parser.add_argument("--device", default="auto")
+    separable_parser.add_argument("--output-dir", type=Path, default=None)
+
+    coupled_surfaces_parser = _add_command_parser(
+        subparsers,
+        "analyze-coupled-surfaces",
+        help_text="Analyze a reduced two-channel avoided crossing and its adiabatic surfaces.",
+    )
+    coupled_surfaces_parser.add_argument("--domain-length", type=float, default=1.0)
+    coupled_surfaces_parser.add_argument("--grid-points", type=int, default=256)
+    coupled_surfaces_parser.add_argument("--slope", type=float, default=30.0)
+    coupled_surfaces_parser.add_argument("--bias", type=float, default=0.0)
+    coupled_surfaces_parser.add_argument("--coupling", type=float, default=2.0)
+    coupled_surfaces_parser.add_argument("--coupling-width", type=float, default=0.12)
+    coupled_surfaces_parser.add_argument("--device", default="cpu")
+    coupled_surfaces_parser.add_argument("--output-dir", type=Path, default=None)
+
+    radial_parser = _add_command_parser(
+        subparsers,
+        "solve-radial-reduction",
+        help_text="Solve a bounded radial effective-coordinate reduction with centrifugal term.",
+    )
+    radial_parser.add_argument("--family", required=True)
+    radial_parser.add_argument("--params", required=True, help="JSON object of radial base-potential parameters.")
+    radial_parser.add_argument("--angular-momentum", type=int, default=0)
+    radial_parser.add_argument("--radial-min", type=float, default=0.05)
+    radial_parser.add_argument("--radial-max", type=float, default=3.0)
+    radial_parser.add_argument("--points", type=int, default=128)
+    radial_parser.add_argument("--states", type=int, default=6)
+    radial_parser.add_argument("--mass", type=float, default=1.0)
+    radial_parser.add_argument("--hbar", type=float, default=1.0)
+    radial_parser.add_argument("--device", default="cpu")
+    radial_parser.add_argument("--output-dir", type=Path, default=None)
 
     compare_parser = subparsers.add_parser(
         "compare-profile-tables",
@@ -772,6 +884,87 @@ def build_parser() -> argparse.ArgumentParser:
     transport_parser.add_argument("--mode-counts", type=int, nargs="*", default=[8, 16, 32, 64])
     transport_parser.add_argument("--device", default="auto")
     transport_parser.add_argument("--output-dir", type=Path, default=None)
+
+    design_transition_parser = _add_command_parser(
+        subparsers,
+        "design-transition",
+        help_text="Optimize potential-family parameters so a selected spectral transition hits a target value.",
+    )
+    design_transition_parser.add_argument("--family", required=True)
+    design_transition_parser.add_argument("--target-transition", type=float, required=True)
+    design_transition_parser.add_argument("--initial-guess", required=True, help="JSON object of family parameter seeds.")
+    design_transition_parser.add_argument("--transition-indices", type=int, nargs=2, default=(0, 1))
+    design_transition_parser.add_argument("--domain-length", type=float, default=1.0)
+    design_transition_parser.add_argument("--left", type=float, default=0.0)
+    design_transition_parser.add_argument("--mass", type=float, default=1.0)
+    design_transition_parser.add_argument("--hbar", type=float, default=1.0)
+    design_transition_parser.add_argument("--points", type=int, default=128)
+    design_transition_parser.add_argument("--states", type=int, default=4)
+    design_transition_parser.add_argument("--steps", type=int, default=200)
+    design_transition_parser.add_argument("--learning-rate", type=float, default=0.05)
+    design_transition_parser.add_argument("--device", default="auto")
+    design_transition_parser.add_argument("--output-dir", type=Path, default=None)
+
+    control_parser = _add_command_parser(
+        subparsers,
+        "optimize-packet-control",
+        help_text="Optimize Gaussian packet preparation parameters for a target observable.",
+    )
+    control_parser.add_argument("--center", type=float, default=0.30)
+    control_parser.add_argument("--width", type=float, default=0.07)
+    control_parser.add_argument("--wavenumber", type=float, default=25.0)
+    control_parser.add_argument("--phase", type=float, default=0.0)
+    control_parser.add_argument(
+        "--objective",
+        choices=["target_position", "target_interval_probability"],
+        default="target_position",
+    )
+    control_parser.add_argument("--target-value", type=float, required=True)
+    control_parser.add_argument("--final-time", type=float, required=True)
+    control_parser.add_argument("--interval", type=float, nargs=2, default=None)
+    control_parser.add_argument("--modes", type=int, default=96)
+    control_parser.add_argument("--quadrature", type=int, default=2048)
+    control_parser.add_argument("--grid", type=int, default=128)
+    control_parser.add_argument("--steps", type=int, default=200)
+    control_parser.add_argument("--learning-rate", type=float, default=0.05)
+    control_parser.add_argument("--device", default="auto")
+    control_parser.add_argument("--output-dir", type=Path, default=None)
+
+    transport_workflow_parser = _add_command_parser(
+        subparsers,
+        "transport-workflow",
+        help_text="Run the barrier/resonance vertical workflow over the shared tunneling experiment stack.",
+    )
+    transport_workflow_parser.add_argument("--barrier-height", type=float, default=50.0)
+    transport_workflow_parser.add_argument("--barrier-width-sigma", type=float, default=0.03)
+    transport_workflow_parser.add_argument("--domain-length", type=float, default=1.0)
+    transport_workflow_parser.add_argument("--grid-points", type=int, default=512)
+    transport_workflow_parser.add_argument("--modes", type=int, default=128)
+    transport_workflow_parser.add_argument("--energies", type=int, default=500)
+    transport_workflow_parser.add_argument("--packet-center", type=float, default=0.25)
+    transport_workflow_parser.add_argument("--packet-width", type=float, default=0.04)
+    transport_workflow_parser.add_argument("--packet-wavenumber", type=float, default=40.0)
+    transport_workflow_parser.add_argument("--device", default="cpu")
+    transport_workflow_parser.add_argument("--output-dir", type=Path, default=None)
+
+    profile_inference_parser = _add_command_parser(
+        subparsers,
+        "profile-inference-workflow",
+        help_text="Run the report-first tabular vertical: report, inverse fit, and spectral feature export.",
+    )
+    profile_inference_parser.add_argument("table_path", type=Path)
+    profile_inference_parser.add_argument("--center", type=float, default=0.36)
+    profile_inference_parser.add_argument("--width", type=float, default=0.11)
+    profile_inference_parser.add_argument("--wavenumber", type=float, default=22.0)
+    profile_inference_parser.add_argument("--phase", type=float, default=0.0)
+    profile_inference_parser.add_argument("--analyze-modes", type=int, default=16)
+    profile_inference_parser.add_argument("--compress-modes", type=int, default=8)
+    profile_inference_parser.add_argument("--inverse-modes", type=int, default=96)
+    profile_inference_parser.add_argument("--feature-modes", type=int, default=16)
+    profile_inference_parser.add_argument("--quadrature", type=int, default=2048)
+    profile_inference_parser.add_argument("--device", default="auto")
+    profile_inference_parser.add_argument("--normalize", action="store_true")
+    profile_inference_parser.add_argument("--output-dir", type=Path, default=None)
 
     tf_parser = subparsers.add_parser(
         "tf-train-table",
@@ -1412,6 +1605,82 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         _emit(summary)
         return 0
 
+    if args.command in {"infer-potential-spectrum", "spectroscopy-workflow"}:
+        raw_initial_guesses = _parse_json_object(args.initial_guesses, flag_name="--initial-guesses")
+        summary = run_spectroscopy_workflow(
+            target_eigenvalues=args.target_eigenvalues,
+            families=args.family,
+            initial_guesses=None if not raw_initial_guesses else _coerce_nested_float_mapping(raw_initial_guesses, flag_name="--initial-guesses"),
+            domain_length=args.domain_length,
+            left=args.left,
+            mass=args.mass,
+            hbar=args.hbar,
+            num_points=args.points,
+            optimization_config=GradientOptimizationConfig(
+                steps=args.steps,
+                learning_rate=args.learning_rate,
+            ),
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_vertical_workflow_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "analyze-separable-spectrum":
+        summary = analyze_separable_tensor_product_spectrum(
+            family_x=args.family_x,
+            parameters_x=_coerce_float_mapping(_parse_json_object(args.params_x, flag_name="--params-x"), flag_name="--params-x"),
+            family_y=args.family_y,
+            parameters_y=_coerce_float_mapping(_parse_json_object(args.params_y, flag_name="--params-y"), flag_name="--params-y"),
+            domain_length_x=args.domain_length_x,
+            domain_length_y=args.domain_length_y,
+            num_points_x=args.points_x,
+            num_points_y=args.points_y,
+            num_states_x=args.states_x,
+            num_states_y=args.states_y,
+            num_combined_states=args.combined_states,
+            low_rank_rank=args.low_rank_rank,
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_reduced_model_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "analyze-coupled-surfaces":
+        summary = analyze_coupled_channel_surfaces(
+            domain_length=args.domain_length,
+            grid_points=args.grid_points,
+            slope=args.slope,
+            bias=args.bias,
+            coupling=args.coupling,
+            coupling_width=args.coupling_width,
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_reduced_model_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "solve-radial-reduction":
+        summary = solve_radial_reduction(
+            family=args.family,
+            parameters=_coerce_float_mapping(_parse_json_object(args.params, flag_name="--params"), flag_name="--params"),
+            angular_momentum=args.angular_momentum,
+            radial_min=args.radial_min,
+            radial_max=args.radial_max,
+            num_points=args.points,
+            num_states=args.states,
+            mass=args.mass,
+            hbar=args.hbar,
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_reduced_model_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
     if args.command in {"compare-profile-tables", "compare-tables"}:
         summary = compare_profile_tables(
             load_profile_table(args.reference_table_path),
@@ -1705,6 +1974,98 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         )
         if args.output_dir is not None:
             write_transport_benchmark_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "design-transition":
+        summary = design_potential_for_target_transition(
+            family=args.family,
+            target_transition=args.target_transition,
+            transition_indices=tuple(args.transition_indices),
+            initial_guess=_coerce_float_mapping(
+                _parse_json_object(args.initial_guess, flag_name="--initial-guess"),
+                flag_name="--initial-guess",
+            ),
+            domain_length=args.domain_length,
+            left=args.left,
+            mass=args.mass,
+            hbar=args.hbar,
+            num_points=args.points,
+            num_states=args.states,
+            optimization_config=GradientOptimizationConfig(
+                steps=args.steps,
+                learning_rate=args.learning_rate,
+            ),
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_differentiable_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "optimize-packet-control":
+        summary = optimize_packet_control(
+            initial_guess={
+                "center": args.center,
+                "width": args.width,
+                "wavenumber": args.wavenumber,
+                "phase": args.phase,
+            },
+            objective=args.objective,
+            target_value=args.target_value,
+            final_time=args.final_time,
+            interval=None if args.interval is None else (args.interval[0], args.interval[1]),
+            num_modes=args.modes,
+            quadrature_points=args.quadrature,
+            grid_points=args.grid,
+            optimization_config=GradientOptimizationConfig(
+                steps=args.steps,
+                learning_rate=args.learning_rate,
+            ),
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_differentiable_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "transport-workflow":
+        summary = run_transport_resonance_workflow(
+            barrier_height=args.barrier_height,
+            barrier_width_sigma=args.barrier_width_sigma,
+            domain_length=args.domain_length,
+            grid_points=args.grid_points,
+            num_modes=args.modes,
+            num_energies=args.energies,
+            packet_center=args.packet_center,
+            packet_width=args.packet_width,
+            packet_wavenumber=args.packet_wavenumber,
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_vertical_workflow_artifacts(args.output_dir, summary)
+        _emit(summary)
+        return 0
+
+    if args.command == "profile-inference-workflow":
+        summary = run_profile_inference_workflow(
+            args.table_path,
+            initial_guess={
+                "center": args.center,
+                "width": args.width,
+                "wavenumber": args.wavenumber,
+                "phase": args.phase,
+            },
+            analyze_num_modes=args.analyze_modes,
+            compress_num_modes=args.compress_modes,
+            inverse_num_modes=args.inverse_modes,
+            feature_num_modes=args.feature_modes,
+            quadrature_points=args.quadrature,
+            normalize_each_profile=args.normalize,
+            device=args.device,
+        )
+        if args.output_dir is not None:
+            write_vertical_workflow_artifacts(args.output_dir, summary)
         _emit(summary)
         return 0
 

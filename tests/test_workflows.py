@@ -110,6 +110,10 @@ def test_fit_gaussian_packet_to_profile_table_recovers_simulated_parameters() ->
     assert abs(result.estimated_parameters.center[0].item() - 0.30) < 0.02
     assert abs(result.estimated_parameters.width[0].item() - 0.07) < 0.02
     assert abs(result.estimated_parameters.wavenumber[0].item() - 25.0) < 0.8
+    assert result.physical_inference is not None
+    assert result.physical_inference.parameter_posterior.parameter_names == ("center", "width", "wavenumber")
+    assert result.physical_inference.coefficient_posterior is not None
+    assert result.physical_inference.sensitivity is not None
 
 
 def test_profile_table_summary_and_compression_sweep() -> None:

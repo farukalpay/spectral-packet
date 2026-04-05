@@ -113,6 +113,80 @@ def write_rows_csv(
     return output_path
 
 
+def _write_parameter_posterior_csv(path: str | Path, parameter_posterior: Any) -> Path:
+    return write_rows_csv(
+        path,
+        [
+            "parameter",
+            "mean",
+            "standard_deviation",
+            "confidence_interval_low",
+            "confidence_interval_high",
+        ],
+        (
+            [
+                name,
+                mean,
+                std,
+                low,
+                high,
+            ]
+            for name, mean, std, low, high in zip(
+                parameter_posterior.parameter_names,
+                torch.as_tensor(parameter_posterior.mean).detach().cpu().tolist(),
+                torch.as_tensor(parameter_posterior.standard_deviation).detach().cpu().tolist(),
+                torch.as_tensor(parameter_posterior.confidence_interval_low).detach().cpu().tolist(),
+                torch.as_tensor(parameter_posterior.confidence_interval_high).detach().cpu().tolist(),
+            )
+        ),
+    )
+
+
+def _write_coefficient_posterior_csv(path: str | Path, coefficient_posterior: Any) -> Path:
+    mean = torch.as_tensor(coefficient_posterior.mean)
+    return write_rows_csv(
+        path,
+        [
+            "mode",
+            "mean_real",
+            "mean_imag",
+            "real_standard_deviation",
+            "imag_standard_deviation",
+            "magnitude_standard_deviation",
+        ],
+        (
+            [
+                index + 1,
+                complex_value.real,
+                complex_value.imag,
+                real_std,
+                imag_std,
+                magnitude_std,
+            ]
+            for index, (complex_value, real_std, imag_std, magnitude_std) in enumerate(
+                zip(
+                    mean.detach().cpu().reshape(-1).tolist(),
+                    torch.as_tensor(coefficient_posterior.real_standard_deviation)
+                    .detach()
+                    .cpu()
+                    .reshape(-1)
+                    .tolist(),
+                    torch.as_tensor(coefficient_posterior.imag_standard_deviation)
+                    .detach()
+                    .cpu()
+                    .reshape(-1)
+                    .tolist(),
+                    torch.as_tensor(coefficient_posterior.magnitude_standard_deviation)
+                    .detach()
+                    .cpu()
+                    .reshape(-1)
+                    .tolist(),
+                )
+            )
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactDirectoryReport:
     output_dir: str
@@ -488,7 +562,290 @@ def write_inverse_artifacts(
             ),
             directory / "predicted_density.csv",
         )
-        write_artifact_index(directory, metadata=_artifact_metadata({"workflow": "fit-table"}, metadata))
+        physical_inference = getattr(summary, "physical_inference", None)
+        if physical_inference is not None:
+            write_json(directory / "uncertainty_summary.json", physical_inference)
+            parameter_posterior = getattr(physical_inference, "parameter_posterior", None)
+            if parameter_posterior is not None:
+                _write_parameter_posterior_csv(directory / "parameter_posterior.csv", parameter_posterior)
+            coefficient_posterior = getattr(physical_inference, "coefficient_posterior", None)
+            if coefficient_posterior is not None:
+                _write_coefficient_posterior_csv(directory / "modal_posterior.csv", coefficient_posterior)
+            sensitivity = getattr(physical_inference, "sensitivity", None)
+            if sensitivity is not None:
+                write_json(directory / "sensitivity_map.json", sensitivity)
+        artifact_metadata = {"workflow": "fit-table", "has_physical_inference": physical_inference is not None}
+        if physical_inference is not None:
+            parameter_posterior = getattr(physical_inference, "parameter_posterior", None)
+            if parameter_posterior is not None:
+                artifact_metadata["identifiability_score"] = getattr(
+                    parameter_posterior,
+                    "identifiability_score",
+                    None,
+                )
+                artifact_metadata["noise_scale"] = getattr(parameter_posterior, "noise_scale", None)
+        write_artifact_index(directory, metadata=_artifact_metadata(artifact_metadata, metadata))
+        return directory
+
+
+def write_potential_inference_artifacts(
+    output_dir: str | Path,
+    summary: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> Path:
+    with _artifact_output_session(output_dir) as directory:
+        write_json(directory / "potential_family_inference.json", summary)
+        write_rows_csv(
+            directory / "candidate_ranking.csv",
+            [
+                "family",
+                "final_loss",
+                "residual_sum_squares",
+                "information_criterion",
+                "relative_evidence_weight",
+            ],
+            [
+                [
+                    candidate.family,
+                    candidate.calibration.final_loss,
+                    candidate.residual_sum_squares,
+                    candidate.information_criterion,
+                    candidate.relative_evidence_weight,
+                ]
+                for candidate in summary.candidates
+            ],
+        )
+        best = summary.candidates[0]
+        write_json(directory / "best_family_calibration.json", best.calibration)
+        if best.calibration.parameter_posterior is not None:
+            _write_parameter_posterior_csv(
+                directory / "best_family_parameter_posterior.csv",
+                best.calibration.parameter_posterior,
+            )
+        if best.calibration.sensitivity is not None:
+            write_json(directory / "best_family_sensitivity_map.json", best.calibration.sensitivity)
+        write_artifact_index(
+            directory,
+            metadata=_artifact_metadata(
+                {
+                    "workflow": "infer-potential-spectrum",
+                    "best_family": summary.best_family,
+                    "candidate_count": len(summary.candidates),
+                },
+                metadata,
+            ),
+        )
+        return directory
+
+
+def write_reduced_model_artifacts(
+    output_dir: str | Path,
+    summary: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> Path:
+    with _artifact_output_session(output_dir) as directory:
+        write_json(directory / "reduced_model_summary.json", summary)
+        model_type = type(summary).__name__
+        if hasattr(summary, "combined_eigenvalues"):
+            write_rows_csv(
+                directory / "combined_spectrum.csv",
+                ["state_index", "eigenvalue", "state_index_x", "state_index_y"],
+                [
+                    [index + 1, value, pair[0], pair[1]]
+                    for index, (value, pair) in enumerate(
+                        zip(
+                            torch.as_tensor(summary.combined_eigenvalues).detach().cpu().tolist(),
+                            summary.state_index_pairs,
+                        )
+                    )
+                ],
+            )
+        if hasattr(summary, "adiabatic_potentials"):
+            grid = torch.as_tensor(summary.grid).detach().cpu().tolist()
+            adiabatic = torch.as_tensor(summary.adiabatic_potentials).detach().cpu()
+            write_rows_csv(
+                directory / "adiabatic_surfaces.csv",
+                ["position", "surface_1", "surface_2"],
+                [
+                    [position, adiabatic[0, index].item(), adiabatic[1, index].item()]
+                    for index, position in enumerate(grid)
+                ],
+            )
+        if hasattr(summary, "effective_potential"):
+            grid = torch.as_tensor(summary.radial_grid).detach().cpu().tolist()
+            potential = torch.as_tensor(summary.effective_potential).detach().cpu().tolist()
+            write_rows_csv(
+                directory / "effective_potential.csv",
+                ["radius", "effective_potential"],
+                [[radius, value] for radius, value in zip(grid, potential)],
+            )
+        if hasattr(summary, "singular_values"):
+            write_rows_csv(
+                directory / "singular_values.csv",
+                ["index", "singular_value"],
+                [
+                    [index + 1, value]
+                    for index, value in enumerate(torch.as_tensor(summary.singular_values).detach().cpu().tolist())
+                ],
+            )
+        write_artifact_index(
+            directory,
+            metadata=_artifact_metadata({"workflow": "reduced-model", "model_type": model_type}, metadata),
+        )
+        return directory
+
+
+def write_differentiable_artifacts(
+    output_dir: str | Path,
+    summary: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> Path:
+    with _artifact_output_session(output_dir) as directory:
+        write_json(directory / "differentiable_summary.json", summary)
+        workflow_name = "differentiable-physics"
+        if hasattr(summary, "target_transition"):
+            workflow_name = "design-transition"
+            write_rows_csv(
+                directory / "transition_design_spectrum.csv",
+                ["state_index", "predicted_eigenvalue"],
+                [
+                    [index + 1, value]
+                    for index, value in enumerate(torch.as_tensor(summary.predicted_eigenvalues).detach().cpu().tolist())
+                ],
+            )
+            write_rows_csv(
+                directory / "transition_gradient.csv",
+                ["parameter", "gradient"],
+                [
+                    [name, gradient]
+                    for name, gradient in zip(
+                        summary.parameter_names,
+                        torch.as_tensor(summary.gradient).detach().cpu().tolist(),
+                    )
+                ],
+            )
+        elif hasattr(summary, "predicted_eigenvalues") and hasattr(summary, "target_eigenvalues"):
+            workflow_name = "calibrate-potential"
+            write_rows_csv(
+                directory / "predicted_eigenvalues.csv",
+                ["state_index", "target_eigenvalue", "predicted_eigenvalue"],
+                [
+                    [index + 1, target, predicted]
+                    for index, (target, predicted) in enumerate(
+                        zip(
+                            torch.as_tensor(summary.target_eigenvalues).detach().cpu().tolist(),
+                            torch.as_tensor(summary.predicted_eigenvalues).detach().cpu().tolist(),
+                        )
+                    )
+                ],
+            )
+            if getattr(summary, "parameter_posterior", None) is not None:
+                _write_parameter_posterior_csv(directory / "parameter_posterior.csv", summary.parameter_posterior)
+            if getattr(summary, "sensitivity", None) is not None:
+                write_json(directory / "sensitivity_map.json", summary.sensitivity)
+        elif hasattr(summary, "final_density"):
+            workflow_name = "optimize-packet-control"
+            write_rows_csv(
+                directory / "optimization_history.csv",
+                ["step", "loss"],
+                [[index, loss] for index, loss in enumerate(summary.history)],
+            )
+            write_rows_csv(
+                directory / "final_density.csv",
+                ["position", "density"],
+                [
+                    [position, density]
+                    for position, density in zip(
+                        torch.as_tensor(summary.observation_grid).detach().cpu().tolist(),
+                        torch.as_tensor(summary.final_density).detach().cpu().tolist(),
+                    )
+                ],
+            )
+            write_rows_csv(
+                directory / "objective_gradient.csv",
+                ["parameter", "gradient"],
+                [
+                    [name, gradient]
+                    for name, gradient in zip(
+                        summary.gradient_summary.parameter_names,
+                        torch.as_tensor(summary.gradient_summary.gradient).detach().cpu().tolist(),
+                    )
+                ],
+            )
+        write_artifact_index(directory, metadata=_artifact_metadata({"workflow": workflow_name}, metadata))
+        return directory
+
+
+def write_vertical_workflow_artifacts(
+    output_dir: str | Path,
+    summary: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> Path:
+    with _artifact_output_session(output_dir) as directory:
+        write_json(directory / "vertical_workflow_summary.json", summary)
+        workflow_name = "vertical-workflow"
+        if hasattr(summary, "family_inference"):
+            workflow_name = "spectroscopy-workflow"
+            write_potential_inference_artifacts(
+                directory / "family_inference",
+                summary.family_inference,
+                metadata={"parent_workflow": workflow_name},
+            )
+            write_rows_csv(
+                directory / "observed_transitions.csv",
+                ["transition_index", "observed_transition", "best_family_transition"],
+                [
+                    [index + 1, observed, predicted]
+                    for index, (observed, predicted) in enumerate(
+                        zip(
+                            torch.as_tensor(summary.observed_transition_energies).detach().cpu().tolist(),
+                            torch.as_tensor(summary.best_family_transition_energies).detach().cpu().tolist(),
+                        )
+                    )
+                ],
+            )
+        elif hasattr(summary, "tunneling"):
+            workflow_name = "transport-workflow"
+            write_json(directory / "transport_report.json", summary.tunneling)
+            write_rows_csv(
+                directory / "resonances.csv",
+                ["index", "resonance_energy", "resonance_width"],
+                [
+                    [index + 1, energy, width]
+                    for index, (energy, width) in enumerate(
+                        zip(summary.tunneling.resonance_energies, summary.tunneling.resonance_widths)
+                    )
+                ],
+            )
+        elif hasattr(summary, "optimization"):
+            workflow_name = "control-workflow"
+            write_differentiable_artifacts(
+                directory / "optimization",
+                summary.optimization,
+                metadata={"parent_workflow": workflow_name},
+            )
+        elif hasattr(summary, "inverse_fit") and hasattr(summary, "feature_export"):
+            workflow_name = "profile-inference-workflow"
+            write_profile_table_report_artifacts(
+                directory / "report",
+                summary.report,
+                metadata={"parent_workflow": workflow_name},
+            )
+            write_inverse_artifacts(
+                directory / "inverse",
+                summary.inverse_fit,
+                metadata={"parent_workflow": workflow_name},
+            )
+            write_feature_table_artifacts(
+                directory / "features",
+                summary.feature_export,
+                metadata={"parent_workflow": workflow_name},
+            )
+        write_artifact_index(directory, metadata=_artifact_metadata({"workflow": workflow_name}, metadata))
         return directory
 
 
@@ -919,4 +1276,8 @@ __all__ = [
     "write_tensorflow_evaluation_artifacts",
     "write_tensorflow_training_artifacts",
     "write_transport_benchmark_artifacts",
+    "write_differentiable_artifacts",
+    "write_potential_inference_artifacts",
+    "write_reduced_model_artifacts",
+    "write_vertical_workflow_artifacts",
 ]

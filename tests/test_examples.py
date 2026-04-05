@@ -104,3 +104,32 @@ def test_api_example_posts_profile_report_workflow() -> None:
     overview = json.loads(lines[1])
     assert overview["analyze_num_modes"] == 16
     assert overview["compress_num_modes"] == 8
+
+
+def test_inverse_physics_example_runs_and_writes_vertical_artifacts(tmp_path) -> None:
+    output_dir = tmp_path / "inverse_physics"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/inverse_physics_workflow.py",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+        ],
+        cwd=_repo_root(),
+        env={**os.environ, "PYTHONPATH": "src"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) >= 2
+    inference = json.loads(lines[0])
+    artifact_report = json.loads(lines[1])
+
+    assert inference["best_family"] == "harmonic"
+    assert artifact_report["complete"] is True
+    assert "family_inference/artifacts.json" in artifact_report["files"]
+    assert "observed_transitions.csv" in artifact_report["files"]

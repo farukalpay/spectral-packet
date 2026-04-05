@@ -45,6 +45,10 @@ def test_product_identity_report_exposes_one_shared_workflow_map() -> None:
     assert report.glue_burdens
     assert any(workflow.workflow_id == "profile-table-report-from-sql" for workflow in report.workflows)
     assert any(workflow.workflow_id == "fit-profile-table-from-sql" for workflow in report.workflows)
+    assert any(workflow.workflow_id == "infer-potential-spectrum" for workflow in report.workflows)
+    assert any(workflow.workflow_id == "analyze-separable-spectrum" for workflow in report.workflows)
+    assert any(workflow.workflow_id == "design-transition" for workflow in report.workflows)
+    assert any(workflow.workflow_id == "profile-inference-workflow" for workflow in report.workflows)
 
 
 def test_workflow_guide_prefers_report_first_for_file_and_sql_inputs() -> None:
@@ -80,3 +84,5 @@ def test_top_level_all_is_deduplicated() -> None:
     assert "tune_tree_model" in spe.__all__
     assert "WorkflowGoal" in spe.__all__
     assert "DatabaseExecutionSummary" in spe.__all__
+    assert "PotentialFamilyInferenceSummary" in spe.__all__
+    assert "run_transport_resonance_workflow" in spe.__all__

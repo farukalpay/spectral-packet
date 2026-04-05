@@ -26,8 +26,8 @@ def generate_synthetic_profile_table(
 
     resolved_profiles = _validate_positive_integer("num_profiles", num_profiles)
     resolved_grid_points = _validate_positive_integer("grid_points", grid_points)
-    if resolved_grid_points < 8:
-        raise ValueError("grid_points must be at least 8 for stable Gaussian profile synthesis")
+    if resolved_grid_points < 4:
+        raise ValueError("grid_points must be at least 4 for stable Gaussian profile synthesis")
 
     torch_device = resolve_torch_device(device)
     grid = torch.linspace(0.0, 1.0, resolved_grid_points, dtype=torch.float64, device=torch_device)

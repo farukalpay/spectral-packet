@@ -33,24 +33,41 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SERVER_PURPOSE = (
-    "Spectral Packet Engine is a bounded-domain spectral computation server. "
+    "Spectral Packet Engine is a spectral inverse physics server centered on bounded-domain computation. "
     "It provides tools for: (1) Gaussian wave-packet simulation and time propagation, "
     "(2) spectral modal decomposition and compression of 1D density profiles, "
-    "(3) inverse reconstruction of wave-packet parameters from observed data, "
-    "(4) Chebyshev and sine-basis spectral analysis with convergence diagnostics, "
-    "(5) momentum-space observables and Heisenberg uncertainty analysis, "
-    "(6) energy conservation verification during propagation, "
-    "(7) SQL-backed scientific data workflows with artifact output, and "
-    "(8) report-first spectral feature export for downstream tree-model workflows. "
+    "(3) uncertainty-aware inverse reconstruction of wave-packet parameters from observed data, "
+    "(4) explicit potential-family inference from observed spectra with local posterior and identifiability summaries, "
+    "(5) controlled reduced models: separable tensor-product spectra, coupled channels, and radial reductions, "
+    "(6) differentiable physics workflows for transition design and packet-control-style optimization, "
+    "(7) report-first scientific tabular workflows with artifact output, "
+    "(8) report-first spectral feature export for downstream tree-model workflows, "
+    "(9) Chebyshev and sine-basis spectral analysis with convergence diagnostics, "
+    "(10) momentum-space observables and Heisenberg uncertainty analysis, "
+    "(11) energy conservation verification during propagation, "
+    "(12) extended spectral methods: Fourier decomposition, Padé approximants, Hilbert transform, "
+    "correlation spectral analysis, Richardson extrapolation, and Kramers-Kronig relations, and "
+    "(13) SQL table operations: pivot, unpivot, interpolation, window aggregates, and type coercion. "
     "All tools operate on the same shared engine core and return structured JSON. "
+    "IMPORTANT for database workflows: "
+    "Database files live on the MCP server — you CANNOT access them via bash, python, or "
+    "direct file I/O. You MUST use the MCP tools for ALL database operations. "
+    "'query_database' is READ-ONLY and returns ALL rows (up to 500 by default, adjustable via max_rows). "
+    "For very large results, use 'export_query_csv' to get a CSV file. "
+    "To create a new database with custom tables, use 'create_scratch_database' with the "
+    "'init_script' parameter — pass your full SQL schema (CREATE TABLE, INSERT, etc.) as "
+    "the init_script string. This is the RECOMMENDED approach. "
+    "Alternatively, use 'execute_database_script' for multi-statement SQL on existing databases, "
+    "or 'execute_database_statement' for single DDL/DML statements. "
+    "To load data via SELECT into a new table, use 'materialize_query_table'. "
+    "NEVER use bash/python to open database files directly — use the MCP tools instead. "
     "Use 'inspect_product' to see the full workflow map, 'guide_workflow' to choose the default "
     "report, inverse-fit, or feature-model loop, 'inspect_environment' to check available hardware, "
     "and 'validate_installation' before heavy computation."
 )
 
 SERVER_PURPOSE_SHORT = (
-    "Bounded-domain spectral computation: packet simulation, report-first modal analysis, "
-    "profile compression, inverse reconstruction, spectral feature export, and SQL-backed data workflows."
+    "Spectral inverse physics: packet simulation, uncertainty-aware inverse inference, controlled reduced models, differentiable design, report-first modal analysis, and SQL-backed workflows."
 )
 
 

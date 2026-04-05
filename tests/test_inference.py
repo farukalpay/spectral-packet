@@ -56,6 +56,26 @@ def test_density_based_reconstruction_recovers_packet_parameters() -> None:
     assert abs(result.parameters.width[0].item() - 0.07) < 0.02
     assert abs(result.parameters.wavenumber[0].item() - 25.0) < 0.8
 
+    posterior = estimator.infer(
+        result.parameters,
+        observation_grid=observation_grid,
+        times=times,
+        target=target,
+        observation_mode="density",
+    )
+
+    assert posterior.parameter_posterior.parameter_names == ("center", "width", "wavenumber")
+    assert posterior.parameter_posterior.mean.shape == (3,)
+    assert posterior.parameter_posterior.covariance.shape == (3, 3)
+    assert posterior.parameter_posterior.standard_deviation.shape == (3,)
+    assert 0.0 <= posterior.parameter_posterior.identifiability_score <= 1.0
+    assert posterior.parameter_posterior.noise_scale > 0.0
+    assert posterior.coefficient_posterior is not None
+    assert posterior.coefficient_posterior.mean.shape == (96,)
+    assert posterior.sensitivity is not None
+    assert posterior.sensitivity.observation_shape == (5, 96)
+    assert posterior.sensitivity.one_sigma_effect.shape == (3, 5, 96)
+
 
 def test_custom_observation_operator_returns_expected_shape() -> None:
     domain = InfiniteWell1D.from_length(1.0)

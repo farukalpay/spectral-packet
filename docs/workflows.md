@@ -2,6 +2,13 @@
 
 These are the workflows that explain the product quickly without broadening what it is.
 
+The repository now has four major workflow families:
+
+- report-first spectral evidence loops,
+- inverse and uncertainty-aware inference,
+- controlled reduced models,
+- differentiable and domain-specific vertical workflows.
+
 If you are unsure which path to use first, ask the product directly:
 
 ```bash
@@ -124,9 +131,49 @@ What the user learns:
 - the SQL-to-profile-table boundary stays explicit through `time_column`, `position_columns`, and `sort_by_time`,
 - the report semantics stay aligned between file-backed and SQL-backed runs.
 
-## 4. CLI Batch Packet Sweep
+## 4. Uncertainty-Aware Inverse Fit
 
-## 4. Explicit SQLite Setup Before SQL Query Workflows
+Input:
+
+- one observed profile table,
+- one physically plausible initial guess for packet center, width, and wavenumber.
+
+Command:
+
+```bash
+spectral-packet-engine fit-profile-table examples/data/synthetic_profiles.csv \
+  --center 0.36 \
+  --width 0.11 \
+  --wavenumber 22.0 \
+  --device cpu \
+  --output-dir artifacts/inverse_fit
+```
+
+Expected outputs:
+
+- one inverse-fit summary with fitted packet parameters and optimization history,
+- one local posterior summary over the inferred physical parameters,
+- one modal-coefficient posterior summary,
+- one sensitivity map bundle that shows which parts of the profile constrain which parameters,
+- one predicted density table and artifact index.
+
+Artifact locations:
+
+- `artifacts/inverse_fit/inverse_fit.json`
+- `artifacts/inverse_fit/predicted_density.csv`
+- `artifacts/inverse_fit/uncertainty_summary.json`
+- `artifacts/inverse_fit/parameter_posterior.csv`
+- `artifacts/inverse_fit/modal_posterior.csv`
+- `artifacts/inverse_fit/sensitivity_map.json`
+- `artifacts/inverse_fit/artifacts.json`
+
+What the user learns:
+
+- inverse reconstruction is no longer only a point estimate; it now exposes confidence intervals, identifiability, and parameter-to-observation sensitivity explicitly,
+- the uncertainty story lives in the shared workflow layer, so Python, CLI, MCP, and API stay aligned,
+- modal coefficients remain part of the answer, but only as one consequence of a broader physical inference result.
+
+## 5. Explicit SQLite Setup Before SQL Query Workflows
 
 Input:
 
@@ -167,7 +214,129 @@ What the user learns:
 - schema creation and seed inserts belong to `execute-database-statement` or `execute-database-script`,
 - later SQL-backed spectral workflows can depend on an explicit, inspectable database-setup step.
 
-## 5. CLI Batch Packet Sweep
+## 6. Spectroscopy-Style Family Inference
+
+Input:
+
+- an observed low-lying spectrum,
+- one or more explicit candidate potential families.
+
+Command:
+
+```bash
+spectral-packet-engine infer-potential-spectrum 5.22 15.83 26.41 \
+  --family harmonic \
+  --family double-well \
+  --device cpu \
+  --output-dir artifacts/spectroscopy
+```
+
+Expected outputs:
+
+- one ranking over candidate potential families,
+- one best-fit calibration summary,
+- local posterior and sensitivity outputs for the best family,
+- one vertical artifact bundle with family-comparison provenance.
+
+Artifact locations:
+
+- `artifacts/spectroscopy/vertical_workflow_summary.json`
+- `artifacts/spectroscopy/family_inference/potential_family_inference.json`
+- `artifacts/spectroscopy/family_inference/candidate_ranking.csv`
+- `artifacts/spectroscopy/family_inference/best_family_calibration.json`
+
+What the user learns:
+
+- the inverse question can now be “which family explains this spectrum?” instead of only “what is one fitted parameter vector?”,
+- family comparison is explicit and inspectable rather than hidden in generic regression logic,
+- the uncertainty story remains local and artifact-backed.
+
+## 7. Controlled Reduced Models
+
+Input:
+
+- a separable structure, a reduced coupled-channel structure, or a radial effective coordinate.
+
+Commands:
+
+```bash
+spectral-packet-engine analyze-separable-spectrum \
+  --family-x harmonic --params-x '{"omega": 8.0}' \
+  --family-y harmonic --params-y '{"omega": 6.0}' \
+  --device cpu
+```
+
+```bash
+spectral-packet-engine analyze-coupled-surfaces --device cpu
+spectral-packet-engine solve-radial-reduction --family morse --params '{"D_e": 8.0, "alpha": 2.0, "x_eq": 0.7}' --device cpu
+```
+
+What the user learns:
+
+- the repository supports structured multidimensional extensions without pretending to be a generic 2D/3D solver,
+- each reduction comes with explicit assumptions in the returned summary,
+- artifact bundles preserve those assumptions alongside the numerical outputs.
+
+## 8. Differentiable Design And Control
+
+Input:
+
+- a target transition energy,
+- or a target observable for packet steering.
+
+Commands:
+
+```bash
+spectral-packet-engine design-transition \
+  --family harmonic \
+  --target-transition 12.0 \
+  --initial-guess '{"omega": 5.0}' \
+  --device cpu
+```
+
+```bash
+spectral-packet-engine optimize-packet-control \
+  --objective target_position \
+  --target-value 0.55 \
+  --final-time 0.004 \
+  --device cpu
+```
+
+What the user learns:
+
+- gradients are now first-class when the physics map is differentiable,
+- the control story stays tied to explicit packet-preparation parameters,
+- differentiable workflows remain subordinate to the spectral core rather than forming a generic training subsystem.
+
+## 9. Vertical Scientific Workflow
+
+Input:
+
+- one profile table,
+- one plausible initial packet guess.
+
+Command:
+
+```bash
+spectral-packet-engine profile-inference-workflow examples/data/synthetic_profiles.csv \
+  --device cpu \
+  --output-dir artifacts/profile_vertical
+```
+
+Expected outputs:
+
+- one report-first profile summary,
+- one uncertainty-aware inverse fit,
+- one spectral feature export,
+- one nested artifact bundle with `report/`, `inverse/`, and `features/`.
+
+What the user learns:
+
+- report-first remains the default even when the end goal is inverse inference or downstream features,
+- the tabular vertical is one coherent workflow rather than three disconnected commands,
+- Python, CLI, and MCP all follow the same nested artifact contract.
+
+## 10. CLI Batch Packet Sweep
 
 Input:
 
@@ -201,7 +370,7 @@ What the user learns:
 - the backend can absorb parameter-sweep work,
 - the project is usable for repeated compute jobs, not only single demos.
 
-## 6. Backend-Aware ML Workflow
+## 11. Backend-Aware ML Workflow
 
 Input:
 
@@ -238,7 +407,7 @@ What the user learns:
 - PyTorch and JAX share one workflow surface,
 - surrogate workloads stay subordinate to the spectral engine instead of becoming a separate product.
 
-## 7. Spectral Feature Export And Tree Models
+## 12. Spectral Feature Export And Tree Models
 
 Status: beta. These workflows are integrated and artifact-backed, but they should still be treated as downstream spectral workflows rather than as a fully generalized tabular ML subsystem.
 
@@ -281,7 +450,7 @@ What the user learns:
 - tree workflows stay tied to spectral inputs and provenance instead of becoming generic tabular tooling,
 - backend availability and optional dependency boundaries are explicit before training starts.
 
-## 7. MCP Workflow
+## 13. MCP Workflow
 
 Input:
 
@@ -314,7 +483,7 @@ What the user learns:
 - MCP is useful because the machine-side backend can do real numerical work through structured domain tools.
 - MCP runtime limits, artifact completion, and logging behavior are explicit instead of hidden in wrapper code.
 
-## 8. Optional API Workflow
+## 14. Optional API Workflow
 
 Input:
 
@@ -349,7 +518,7 @@ What the user learns:
 
 - the HTTP surface is a thin wrapper over the same compute engine, not a separate product.
 
-## 8. CLI Table Comparison Workflow
+## 15. CLI Table Comparison Workflow
 
 Input:
 

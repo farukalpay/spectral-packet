@@ -7,23 +7,38 @@ import numpy as np
 import torch
 
 from spectral_packet_engine import (
+    GradientOptimizationConfig,
     ProfileTable,
     TabularDataset,
     build_profile_table_report,
+    design_potential_for_target_transition,
     export_feature_table_from_profile_table,
+    fit_gaussian_packet_to_profile_table,
+    harmonic_potential,
+    infer_potential_family_from_spectrum,
+    analyze_separable_tensor_product_spectrum,
+    run_profile_inference_workflow,
     save_profile_table_csv,
+    simulate_gaussian_packet,
     train_tree_model,
     tune_tree_model,
 )
 from spectral_packet_engine.artifacts import (
     inspect_artifact_directory,
     to_serializable,
+    write_differentiable_artifacts,
     write_feature_table_artifacts,
+    write_inverse_artifacts,
+    write_potential_inference_artifacts,
     write_profile_table_report_artifacts,
+    write_reduced_model_artifacts,
     write_tabular_artifacts,
     write_tree_training_artifacts,
     write_tree_tuning_artifacts,
+    write_vertical_workflow_artifacts,
 )
+from spectral_packet_engine.domain import InfiniteWell1D
+from spectral_packet_engine.eigensolver import solve_eigenproblem
 
 
 def test_to_serializable_sanitizes_non_finite_numbers() -> None:
@@ -172,6 +187,180 @@ def test_feature_table_artifacts_bundle_has_expected_layout(tmp_path) -> None:
     assert schema_payload["columns"][-1]["semantic_meaning"] == "Integrated profile mass over the bounded 1D domain."
     assert schema_payload["ordering"]["time"]["policy"] == "preserve-profile-table-sample-order"
     assert "numpy" in schema_payload["library_versions"]
+
+
+def test_inverse_artifacts_bundle_includes_uncertainty_outputs(tmp_path) -> None:
+    forward = simulate_gaussian_packet(
+        center=0.30,
+        width=0.07,
+        wavenumber=25.0,
+        times=[0.0, 1e-3, 3e-3],
+        num_modes=48,
+        quadrature_points=1024,
+        grid_points=48,
+        device="cpu",
+    )
+    table = ProfileTable(
+        position_grid=forward.grid.detach().cpu().numpy(),
+        sample_times=forward.times.detach().cpu().numpy(),
+        profiles=forward.densities.detach().cpu().numpy(),
+    )
+    summary = fit_gaussian_packet_to_profile_table(
+        table,
+        initial_guess={
+            "center": 0.35,
+            "width": 0.10,
+            "wavenumber": 23.0,
+            "phase": 0.0,
+        },
+        num_modes=48,
+        quadrature_points=1024,
+        steps=120,
+        learning_rate=0.05,
+        device="cpu",
+    )
+
+    output_dir = tmp_path / "inverse_bundle"
+    write_inverse_artifacts(output_dir, summary)
+    report = inspect_artifact_directory(output_dir)
+    uncertainty_payload = json.loads((output_dir / "uncertainty_summary.json").read_text(encoding="utf-8"))
+    sensitivity_payload = json.loads((output_dir / "sensitivity_map.json").read_text(encoding="utf-8"))
+
+    assert report.complete is True
+    assert "inverse_fit.json" in report.files
+    assert "predicted_density.csv" in report.files
+    assert "uncertainty_summary.json" in report.files
+    assert "parameter_posterior.csv" in report.files
+    assert "modal_posterior.csv" in report.files
+    assert "sensitivity_map.json" in report.files
+    assert report.metadata["workflow"] == "fit-table"
+    assert report.metadata["has_physical_inference"] is True
+    assert uncertainty_payload["parameter_posterior"]["parameter_names"] == ["center", "width", "wavenumber"]
+    assert sensitivity_payload["parameter_names"] == ["center", "width", "wavenumber"]
+
+
+def test_potential_inference_and_reduced_model_artifacts_follow_shared_bundle_contract(tmp_path) -> None:
+    domain = InfiniteWell1D.from_length(1.0, dtype=torch.float64, device="cpu")
+    target = solve_eigenproblem(
+        lambda x: harmonic_potential(x, omega=8.0, domain=domain),
+        domain,
+        num_points=128,
+        num_states=3,
+    ).eigenvalues
+    inference_summary = infer_potential_family_from_spectrum(
+        target_eigenvalues=target,
+        families=("harmonic", "double-well"),
+        initial_guesses={
+            "harmonic": {"omega": 5.0},
+            "double-well": {"a_param": 1.5, "b_param": 1.0},
+        },
+        num_points=128,
+        optimization_config=GradientOptimizationConfig(steps=120, learning_rate=0.04),
+        device="cpu",
+    )
+    inference_dir = tmp_path / "potential_inference"
+    write_potential_inference_artifacts(inference_dir, inference_summary)
+    inference_report = inspect_artifact_directory(inference_dir)
+
+    assert inference_report.complete is True
+    assert "potential_family_inference.json" in inference_report.files
+    assert "candidate_ranking.csv" in inference_report.files
+    assert inference_report.metadata["workflow"] == "infer-potential-spectrum"
+    assert inference_report.metadata["best_family"] == "harmonic"
+
+    reduced_summary = analyze_separable_tensor_product_spectrum(
+        family_x="harmonic",
+        parameters_x={"omega": 8.0},
+        family_y="harmonic",
+        parameters_y={"omega": 6.0},
+        num_points_x=64,
+        num_points_y=64,
+        num_states_x=4,
+        num_states_y=4,
+        num_combined_states=6,
+        device="cpu",
+    )
+    reduced_dir = tmp_path / "reduced_model"
+    write_reduced_model_artifacts(reduced_dir, reduced_summary)
+    reduced_report = inspect_artifact_directory(reduced_dir)
+
+    assert reduced_report.complete is True
+    assert "reduced_model_summary.json" in reduced_report.files
+    assert "combined_spectrum.csv" in reduced_report.files
+    assert reduced_report.metadata["workflow"] == "reduced-model"
+
+
+def test_differentiable_and_vertical_artifacts_follow_shared_bundle_contract(tmp_path) -> None:
+    domain = InfiniteWell1D.from_length(1.0, dtype=torch.float64, device="cpu")
+    target_spectrum = solve_eigenproblem(
+        lambda x: harmonic_potential(x, omega=7.5, domain=domain),
+        domain,
+        num_points=128,
+        num_states=3,
+    ).eigenvalues
+    target_transition = float((target_spectrum[1] - target_spectrum[0]).item())
+    design_summary = design_potential_for_target_transition(
+        family="harmonic",
+        target_transition=target_transition,
+        initial_guess={"omega": 4.0},
+        num_points=128,
+        num_states=3,
+        optimization_config=GradientOptimizationConfig(steps=120, learning_rate=0.04),
+        device="cpu",
+    )
+    differentiable_dir = tmp_path / "differentiable"
+    write_differentiable_artifacts(differentiable_dir, design_summary)
+    differentiable_report = inspect_artifact_directory(differentiable_dir)
+
+    assert differentiable_report.complete is True
+    assert "differentiable_summary.json" in differentiable_report.files
+    assert "transition_design_spectrum.csv" in differentiable_report.files
+    assert differentiable_report.metadata["workflow"] == "design-transition"
+
+    forward = simulate_gaussian_packet(
+        center=0.30,
+        width=0.07,
+        wavenumber=25.0,
+        times=[0.0, 1e-3, 3e-3],
+        num_modes=48,
+        quadrature_points=1024,
+        grid_points=48,
+        device="cpu",
+    )
+    table_path = tmp_path / "profiles.csv"
+    save_profile_table_csv(
+        ProfileTable(
+            position_grid=forward.grid.detach().cpu().numpy(),
+            sample_times=forward.times.detach().cpu().numpy(),
+            profiles=forward.densities.detach().cpu().numpy(),
+        ),
+        table_path,
+    )
+    vertical_summary = run_profile_inference_workflow(
+        table_path,
+        initial_guess={
+            "center": 0.35,
+            "width": 0.10,
+            "wavenumber": 23.0,
+            "phase": 0.0,
+        },
+        analyze_num_modes=8,
+        compress_num_modes=4,
+        inverse_num_modes=48,
+        feature_num_modes=6,
+        quadrature_points=1024,
+        device="cpu",
+    )
+    vertical_dir = tmp_path / "vertical"
+    write_vertical_workflow_artifacts(vertical_dir, vertical_summary)
+    vertical_report = inspect_artifact_directory(vertical_dir)
+
+    assert vertical_report.complete is True
+    assert "vertical_workflow_summary.json" in vertical_report.files
+    assert "report/artifacts.json" in vertical_report.files
+    assert "inverse/artifacts.json" in vertical_report.files
+    assert "features/artifacts.json" in vertical_report.files
+    assert vertical_report.metadata["workflow"] == "profile-inference-workflow"
 
 
 def test_tree_training_and_tuning_artifacts_follow_shared_bundle_contract(tmp_path) -> None:

@@ -8,9 +8,9 @@ from typing import Any, Literal
 
 PRODUCT_NAME = "Spectral Packet Engine"
 PRODUCT_SPINE_STATEMENT = (
-    "A Python-first bounded-domain spectral computation library for packet simulation, "
-    "modal analysis, profile compression, and inverse reconstruction, with file, SQL, "
-    "CLI, MCP, and API surfaces over the same engine."
+    "A Python-first spectral inverse physics engine for bounded-domain packet simulation, "
+    "uncertainty-aware inverse reconstruction, controlled reduced models, differentiable design, "
+    "and vertical scientific workflows, with file, SQL, CLI, MCP, and API surfaces over the same core."
 )
 RUNTIME_SPINE_STATEMENT = (
     "One shared Python engine validates environment assumptions explicitly, runs bounded "
@@ -299,7 +299,7 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
             mcp="fit_packet_to_profile_table",
             api="POST /inverse/fit",
         ),
-        artifact_story="Writes inverse-fit artifacts that capture fitted packet parameters, optimization state, and reconstruction diagnostics.",
+        artifact_story="Writes inverse-fit artifacts that capture fitted packet parameters, optimization state, posterior uncertainty, identifiability, and reconstruction diagnostics.",
     ),
     WorkflowIdentity(
         workflow_id="fit-profile-table-from-sql",
@@ -311,7 +311,84 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
             mcp="fit_packet_to_database_profile_query",
             api="POST /inverse/fit-from-sql",
         ),
-        artifact_story="Writes the same inverse-fit bundle as file-backed runs and records SQL provenance in the artifact metadata.",
+        artifact_story="Writes the same uncertainty-aware inverse-fit bundle as file-backed runs and records SQL provenance in the artifact metadata.",
+    ),
+    WorkflowIdentity(
+        workflow_id="infer-potential-spectrum",
+        label="Infer Potential Spectrum",
+        summary="Compare explicit bounded-domain potential families against an observed low-lying spectrum and report family ranking plus local uncertainty.",
+        surfaces=WorkflowSurfaceBindings(
+            python="infer_potential_family_from_spectrum(...)",
+            cli="infer-potential-spectrum",
+            mcp="infer_potential_spectrum",
+        ),
+        artifact_story="Writes family ranking, best-fit calibration, and posterior/sensitivity artifacts through the shared artifact layer.",
+    ),
+    WorkflowIdentity(
+        workflow_id="analyze-separable-spectrum",
+        label="Analyze Separable Spectrum",
+        summary="Analyze a controlled separable tensor-product spectrum built from two explicit 1D bounded-domain components.",
+        surfaces=WorkflowSurfaceBindings(
+            python="analyze_separable_tensor_product_spectrum(...)",
+            cli="analyze-separable-spectrum",
+            mcp="analyze_separable_spectrum",
+        ),
+        artifact_story="Writes combined spectrum and reduced-model metadata without claiming unrestricted multidimensional support.",
+    ),
+    WorkflowIdentity(
+        workflow_id="solve-radial-reduction",
+        label="Solve Radial Reduction",
+        summary="Solve a bounded radial effective-coordinate reduction with an explicit centrifugal term and base potential family.",
+        surfaces=WorkflowSurfaceBindings(
+            python="solve_radial_reduction(...)",
+            cli="solve-radial-reduction",
+            mcp="solve_radial_reduction",
+        ),
+        artifact_story="Writes radial effective-potential summaries and eigenvalue outputs through the shared artifact layer.",
+    ),
+    WorkflowIdentity(
+        workflow_id="design-transition",
+        label="Design Transition",
+        summary="Perform differentiable inverse design so a selected spectral transition matches a target value for one explicit potential family.",
+        surfaces=WorkflowSurfaceBindings(
+            python="design_potential_for_target_transition(...)",
+            cli="design-transition",
+            mcp="design_transition",
+        ),
+        artifact_story="Writes transition-design spectra and parameter gradients through the shared differentiable artifact layer.",
+    ),
+    WorkflowIdentity(
+        workflow_id="optimize-packet-control",
+        label="Optimize Packet Control",
+        summary="Optimize Gaussian packet preparation parameters to steer a target observable through differentiable spectral propagation.",
+        surfaces=WorkflowSurfaceBindings(
+            python="optimize_packet_control(...)",
+            cli="optimize-packet-control",
+            mcp="optimize_packet_control",
+        ),
+        artifact_story="Writes optimization history, final density, and objective-gradient artifacts through the shared differentiable artifact layer.",
+    ),
+    WorkflowIdentity(
+        workflow_id="transport-workflow",
+        label="Transport Workflow",
+        summary="Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.",
+        surfaces=WorkflowSurfaceBindings(
+            python="run_transport_resonance_workflow(...)",
+            cli="transport-workflow",
+            mcp="transport_workflow",
+        ),
+        artifact_story="Writes one transport-focused vertical bundle with resonance tables and tunneling diagnostics.",
+    ),
+    WorkflowIdentity(
+        workflow_id="profile-inference-workflow",
+        label="Profile Inference Workflow",
+        summary="Run the report-first tabular vertical that combines profile reporting, inverse fitting with uncertainty, and spectral feature export.",
+        surfaces=WorkflowSurfaceBindings(
+            python="run_profile_inference_workflow(...)",
+            cli="profile-inference-workflow",
+            mcp="profile_inference_workflow",
+        ),
+        artifact_story="Writes one vertical bundle that nests report, inverse, and feature artifacts under a shared provenance root.",
     ),
     WorkflowIdentity(
         workflow_id="profile-table-report",

@@ -67,6 +67,31 @@ def _make_feature_csv(tmp_path) -> str:
     return str(path)
 
 
+def _make_simulated_packet_csv(tmp_path) -> str:
+    from spectral_packet_engine import simulate_gaussian_packet
+
+    forward = simulate_gaussian_packet(
+        center=0.30,
+        width=0.07,
+        wavenumber=25.0,
+        times=[0.0, 1e-3, 3e-3],
+        num_modes=48,
+        quadrature_points=1024,
+        grid_points=48,
+        device="cpu",
+    )
+    path = tmp_path / "simulated_profiles.csv"
+    save_profile_table_csv(
+        ProfileTable(
+            position_grid=forward.grid.detach().cpu().numpy(),
+            sample_times=forward.times.detach().cpu().numpy(),
+            profiles=forward.densities.detach().cpu().numpy(),
+        ),
+        path,
+    )
+    return str(path)
+
+
 def test_cli_env_emits_json(capsys) -> None:
     exit_code = main(["env", "--device", "cpu"])
     captured = capsys.readouterr().out
@@ -118,6 +143,12 @@ def test_cli_help_and_version_surface(capsys) -> None:
     assert "probe-mcp" in help_text
     assert "plan-mcp-tunnel" in help_text
     assert "install-mcp-service" in help_text
+    assert "infer-potential-spectrum" in help_text
+    assert "analyze-separable-spectrum" in help_text
+    assert "design-transition" in help_text
+    assert "optimize-packet-control" in help_text
+    assert "transport-workflow" in help_text
+    assert "profile-inference-workflow" in help_text
     assert "Then run the local release gate:" in help_text
     assert "profile-report" in help_text
 
@@ -237,6 +268,127 @@ def test_cli_validate_install_and_inspect_table(tmp_path, capsys) -> None:
     assert exit_code == 0
     assert payload["num_modes"] == 12
     assert "spectral_summary" in payload
+
+
+def test_cli_inverse_physics_and_reduced_model_commands(tmp_path, capsys) -> None:
+    from spectral_packet_engine import InfiniteWell1D, harmonic_potential
+    from spectral_packet_engine.eigensolver import solve_eigenproblem
+
+    import torch
+
+    domain = InfiniteWell1D.from_length(1.0, dtype=torch.float64, device="cpu")
+    target = solve_eigenproblem(
+        lambda x: harmonic_potential(x, omega=8.0, domain=domain),
+        domain,
+        num_points=128,
+        num_states=3,
+    ).eigenvalues.detach().cpu().tolist()
+
+    exit_code = main(
+        [
+            "infer-potential-spectrum",
+            *[str(value) for value in target],
+            "--family",
+            "harmonic",
+            "--family",
+            "double-well",
+            "--initial-guesses",
+            json.dumps(
+                {
+                    "harmonic": {"omega": 5.0},
+                    "double-well": {"a_param": 1.5, "b_param": 1.0},
+                }
+            ),
+            "--steps",
+            "120",
+            "--learning-rate",
+            "0.04",
+            "--device",
+            "cpu",
+            "--output-dir",
+            str(tmp_path / "spectroscopy"),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["family_inference"]["best_family"] == "harmonic"
+    assert (tmp_path / "spectroscopy" / "family_inference" / "candidate_ranking.csv").exists()
+
+    exit_code = main(
+        [
+            "analyze-separable-spectrum",
+            "--family-x",
+            "harmonic",
+            "--params-x",
+            json.dumps({"omega": 8.0}),
+            "--family-y",
+            "harmonic",
+            "--params-y",
+            json.dumps({"omega": 6.0}),
+            "--device",
+            "cpu",
+            "--output-dir",
+            str(tmp_path / "separable"),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["family_x"] == "harmonic"
+    assert (tmp_path / "separable" / "combined_spectrum.csv").exists()
+
+
+def test_cli_differentiable_and_vertical_commands(tmp_path, capsys) -> None:
+    exit_code = main(
+        [
+            "design-transition",
+            "--family",
+            "harmonic",
+            "--target-transition",
+            "12.0",
+            "--initial-guess",
+            json.dumps({"omega": 5.0}),
+            "--steps",
+            "80",
+            "--learning-rate",
+            "0.03",
+            "--device",
+            "cpu",
+            "--output-dir",
+            str(tmp_path / "design"),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["family"] == "harmonic"
+    assert (tmp_path / "design" / "transition_design_spectrum.csv").exists()
+
+    csv_path = _make_simulated_packet_csv(tmp_path)
+    exit_code = main(
+        [
+            "profile-inference-workflow",
+            csv_path,
+            "--analyze-modes",
+            "8",
+            "--compress-modes",
+            "4",
+            "--inverse-modes",
+            "48",
+            "--feature-modes",
+            "6",
+            "--quadrature",
+            "1024",
+            "--device",
+            "cpu",
+            "--output-dir",
+            str(tmp_path / "profile_vertical"),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["report"]["overview"]["analyze_num_modes"] == 8
+    assert (tmp_path / "profile_vertical" / "report" / "artifacts.json").exists()
+    assert (tmp_path / "profile_vertical" / "inverse" / "artifacts.json").exists()
+    assert (tmp_path / "profile_vertical" / "features" / "artifacts.json").exists()
 
 
 def test_cli_profile_report_and_artifact_inspection(tmp_path, capsys) -> None:
