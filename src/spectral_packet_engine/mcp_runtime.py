@@ -107,6 +107,17 @@ class MCPServerConfig:
     max_generated_profiles: int = 512
     max_generated_grid_points: int = 4096
     max_execute_python_code_chars: int = 20000
+    # ── Security limits (library-level, apply to all deployments) ──
+    max_database_size_mb: float = 256.0
+    max_scratch_databases: int = 20
+    max_script_length_chars: int = 500_000
+    max_script_statements: int = 5_000
+    max_query_seconds: float = 30.0
+    max_pivot_cardinality: int = 500
+    max_interpolation_steps: int = 100_000
+    max_unpivot_columns: int = 200
+    max_result_rows_materialize: int = 500_000
+    rate_limit_per_minute: int = 120
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "transport", _normalize_transport(self.transport))
@@ -122,6 +133,22 @@ class MCPServerConfig:
             raise ValueError("max_generated_grid_points must be positive")
         if self.max_execute_python_code_chars <= 0:
             raise ValueError("max_execute_python_code_chars must be positive")
+        if self.max_database_size_mb <= 0:
+            raise ValueError("max_database_size_mb must be positive")
+        if self.max_scratch_databases <= 0:
+            raise ValueError("max_scratch_databases must be positive")
+        if self.max_script_length_chars <= 0:
+            raise ValueError("max_script_length_chars must be positive")
+        if self.max_script_statements <= 0:
+            raise ValueError("max_script_statements must be positive")
+        if self.max_query_seconds <= 0:
+            raise ValueError("max_query_seconds must be positive")
+        if self.max_pivot_cardinality <= 0:
+            raise ValueError("max_pivot_cardinality must be positive")
+        if self.max_interpolation_steps <= 0:
+            raise ValueError("max_interpolation_steps must be positive")
+        if self.rate_limit_per_minute <= 0:
+            raise ValueError("rate_limit_per_minute must be positive")
         object.__setattr__(self, "log_level", _normalize_log_level(self.log_level))
         object.__setattr__(self, "log_file", None if self.log_file is None else str(self.log_file))
         object.__setattr__(self, "allow_unsafe_python", bool(self.allow_unsafe_python))
