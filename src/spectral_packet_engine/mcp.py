@@ -791,17 +791,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         _check_not_local_path(table_path, "inspect_profile_table")
         return to_serializable(summarize_profile_table(load_profile_table(table_path), device=device))
 
-    @_tool(
-        server,
-        runtime,
-        "profile_table_report",
-        "Full pipeline on a profile table file FROM THE SERVER: inspect, decompose into modal basis, compress, return a unified report. If your data is local, use write_scratch_file first to upload it.",
-        bounded=True,
-        intent_phrases=(
-            "the user wants the report-first path for one profile table",
-            "the user asks for modal decomposition and compression in one call",
-        ),
-    )
+    @_tool(server, runtime, "profile_table_report", "Full pipeline on a profile table file FROM THE SERVER: inspect, decompose into modal basis, compress, return a unified report. If your data is local, use write_scratch_file first to upload it.", bounded=True)
     def profile_table_report_tool(
         table_path: str,
         analyze_num_modes: int = DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
@@ -3537,13 +3527,9 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "then be passed to inspect_profile_table, profile_table_report, write_database_table, "
         "or any tool that needs a file path. Files live on the MCP server, NOT on your local "
         "filesystem. Max 5 MB per file.",
-        intent_phrases=(
-            "the user has inline CSV, JSON, or SQL content that must become a server-side file",
-            "the caller needs a scratch path before running a file-based MCP tool",
-        ),
     )
     def write_scratch_file_tool(
-        name: str,
+        filename: str,
         content: str,
     ) -> dict[str, Any]:
         max_size = 5 * 1024 * 1024  # 5 MB
@@ -3552,9 +3538,9 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 f"Content is {len(content):,} bytes, exceeding the 5 MB limit. "
                 f"Split into smaller files or use create_scratch_database with init_script."
             )
-        path = _managed_scratch_path(runtime.config, name)
+        path = _managed_scratch_path(runtime.config, filename)
         path.write_text(content, encoding="utf-8")
-        _audit_log(runtime.config, "WRITE", name, size=len(content))
+        _audit_log(runtime.config, "WRITE", filename, size=len(content))
         return {
             "path": str(path),
             "size_bytes": len(content),
@@ -3572,17 +3558,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Use this to retrieve previously written files or inspect generated outputs.",
     )
     def read_scratch_file_tool(
-        name: str,
+        filename: str,
         max_lines: int = 500,
     ) -> dict[str, Any]:
-        path = _managed_scratch_path(runtime.config, name)
+        path = _managed_scratch_path(runtime.config, filename)
         if not path.exists():
             available = [
                 f.name for f in path.parent.iterdir()
                 if f.is_file()
             ] if path.parent.exists() else []
             raise FileNotFoundError(
-                f"File {name!r} not found in scratch directory. "
+                f"File {filename!r} not found in scratch directory. "
                 f"Available files: {available}"
             )
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -3633,10 +3619,6 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Creates the database if it doesn't exist. This is the FASTEST way to load "
         "tabular data for analysis.",
         bounded=True,
-        intent_phrases=(
-            "the user wants to load inline CSV into SQLite in one step",
-            "the caller needs the fastest path from CSV text to a queryable database table",
-        ),
     )
     def upload_csv_to_database_tool(
         csv_content: str,
@@ -3679,23 +3661,19 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Upload inline CSV text as a profile table file, ready for inspect_profile_table "
         "or profile_table_report. Returns the server-side path. CSV must have a header row. "
         "This is the FASTEST way to run spectral analysis on your own data.",
-        intent_phrases=(
-            "the user has a CSV in memory and wants to run profile analysis without manual file management",
-            "the caller needs a server-side profile-table path from inline CSV text",
-        ),
     )
     def upload_csv_for_analysis_tool(
         csv_content: str,
-        name: str = "profile.csv",
+        filename: str = "profile.csv",
     ) -> dict[str, Any]:
         max_size = 5 * 1024 * 1024
         if len(csv_content) > max_size:
             raise ValueError(
                 f"CSV content is {len(csv_content):,} bytes, exceeding the 5 MB limit."
             )
-        path = _managed_scratch_path(runtime.config, name)
+        path = _managed_scratch_path(runtime.config, filename)
         path.write_text(csv_content, encoding="utf-8")
-        _audit_log(runtime.config, "UPLOAD_CSV", name, size=len(csv_content))
+        _audit_log(runtime.config, "UPLOAD_CSV", filename, size=len(csv_content))
         line_count = csv_content.count("\n")
         return {
             "path": str(path),
@@ -3714,16 +3692,16 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Delete a file from the managed scratch directory to free space.",
     )
     def delete_scratch_file_tool(
-        name: str,
+        filename: str,
     ) -> dict[str, Any]:
-        path = _managed_scratch_path(runtime.config, name)
+        path = _managed_scratch_path(runtime.config, filename)
         if not path.exists():
-            raise FileNotFoundError(f"File {name!r} not found in scratch directory.")
+            raise FileNotFoundError(f"File {filename!r} not found in scratch directory.")
         size = path.stat().st_size
         path.unlink()
-        _audit_log(runtime.config, "DELETE", name, freed_bytes=size)
+        _audit_log(runtime.config, "DELETE", filename, freed_bytes=size)
         return {
-            "deleted": name,
+            "deleted": filename,
             "freed_bytes": size,
         }
 
