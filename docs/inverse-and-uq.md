@@ -10,6 +10,8 @@ It supports:
 - local posterior summaries over inferred packet parameters,
 - coefficient posterior summaries,
 - sensitivity and identifiability outputs,
+- posterior-predictive intervals over observed densities or calibrated spectra,
+- observation-information maps that show which channels carry local Fisher information,
 - explicit potential-family inference from observed low-lying spectra.
 
 It does not add a heavyweight probabilistic framework or a generic Bayesian platform.
@@ -77,6 +79,8 @@ Packet inverse fit bundles may include:
 - `parameter_posterior.csv`
 - `modal_posterior.csv`
 - `sensitivity_map.json`
+- `observation_posterior.json`
+- `observation_information.json`
 
 Potential-family inference bundles may include:
 
@@ -85,6 +89,8 @@ Potential-family inference bundles may include:
 - `best_family_calibration.json`
 - `best_family_parameter_posterior.csv`
 - `best_family_sensitivity_map.json`
+- `best_family_observation_posterior.json`
+- `best_family_observation_information.json`
 
 ## Interpretation
 
@@ -92,6 +98,7 @@ These uncertainty summaries are local.
 
 - Packet inverse fit uses a local linearization around the optimized parameter vector.
 - Potential-family ranking uses an explicit BIC-style evidence score over a small family set.
+- Observation-information maps are local Fisher traces over the observed channels; they indicate where information concentrates, not global experiment design optima.
 - Confidence intervals and identifiability scores describe local observability, not global uniqueness.
 
 Those limitations are surfaced in result objects and artifacts instead of being hidden behind probabilistic language.

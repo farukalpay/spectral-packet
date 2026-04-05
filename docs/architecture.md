@@ -71,6 +71,7 @@ Advanced physics modules:
 - `src/spectral_packet_engine/pipelines.py` — auto-parameterized analysis pipelines
 - `src/spectral_packet_engine/load_spectral.py` — spectral load modeling, adaptive throttling, anomaly detection
 - `src/spectral_packet_engine/parametric_potentials.py` — explicit parameterized potential families for inference and design
+- `src/spectral_packet_engine/uq.py` — shared local posterior, predictive-interval, and identifiability summaries
 - `src/spectral_packet_engine/reduced_models.py` — separable, coupled-channel, radial, and low-rank reduced-model surfaces
 - `src/spectral_packet_engine/differentiable_physics.py` — differentiable calibration and inverse-design workflows
 - `src/spectral_packet_engine/vertical_workflows.py` — domain-specific spectroscopy, transport, control, and tabular verticals

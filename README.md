@@ -22,7 +22,8 @@ This upgrade extends that core in four focused directions:
 1. Inverse problems + uncertainty quantification
    - local posterior summaries for inverse packet fitting,
    - parameter confidence intervals,
-   - identifiability and sensitivity maps,
+   - identifiability, sensitivity, and observation-information maps,
+   - posterior-predictive intervals over fitted densities or calibrated spectra,
    - explicit potential-family inference from observed spectra.
 2. Controlled reduced models beyond plain 1D
    - separable tensor-product spectra,
@@ -234,6 +235,8 @@ New bundle patterns include:
   - `uncertainty_summary.json`
   - `parameter_posterior.csv`
   - `modal_posterior.csv`
+  - `observation_posterior.json`
+  - `observation_information.json`
   - `sensitivity_map.json`
 - potential-family inference:
   - `potential_family_inference.json`

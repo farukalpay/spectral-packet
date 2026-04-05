@@ -574,6 +574,12 @@ def write_inverse_artifacts(
             sensitivity = getattr(physical_inference, "sensitivity", None)
             if sensitivity is not None:
                 write_json(directory / "sensitivity_map.json", sensitivity)
+            observation_posterior = getattr(physical_inference, "observation_posterior", None)
+            if observation_posterior is not None:
+                write_json(directory / "observation_posterior.json", observation_posterior)
+            observation_information = getattr(physical_inference, "observation_information", None)
+            if observation_information is not None:
+                write_json(directory / "observation_information.json", observation_information)
         artifact_metadata = {"workflow": "fit-table", "has_physical_inference": physical_inference is not None}
         if physical_inference is not None:
             parameter_posterior = getattr(physical_inference, "parameter_posterior", None)
@@ -625,6 +631,13 @@ def write_potential_inference_artifacts(
             )
         if best.calibration.sensitivity is not None:
             write_json(directory / "best_family_sensitivity_map.json", best.calibration.sensitivity)
+        if getattr(best.calibration, "observation_posterior", None) is not None:
+            write_json(directory / "best_family_observation_posterior.json", best.calibration.observation_posterior)
+        if getattr(best.calibration, "observation_information", None) is not None:
+            write_json(
+                directory / "best_family_observation_information.json",
+                best.calibration.observation_information,
+            )
         write_artifact_index(
             directory,
             metadata=_artifact_metadata(
@@ -746,6 +759,10 @@ def write_differentiable_artifacts(
                 _write_parameter_posterior_csv(directory / "parameter_posterior.csv", summary.parameter_posterior)
             if getattr(summary, "sensitivity", None) is not None:
                 write_json(directory / "sensitivity_map.json", summary.sensitivity)
+            if getattr(summary, "observation_posterior", None) is not None:
+                write_json(directory / "observation_posterior.json", summary.observation_posterior)
+            if getattr(summary, "observation_information", None) is not None:
+                write_json(directory / "observation_information.json", summary.observation_information)
         elif hasattr(summary, "final_density"):
             workflow_name = "optimize-packet-control"
             write_rows_csv(

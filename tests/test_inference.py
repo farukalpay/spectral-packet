@@ -75,6 +75,13 @@ def test_density_based_reconstruction_recovers_packet_parameters() -> None:
     assert posterior.sensitivity is not None
     assert posterior.sensitivity.observation_shape == (5, 96)
     assert posterior.sensitivity.one_sigma_effect.shape == (3, 5, 96)
+    assert posterior.observation_posterior is not None
+    assert posterior.observation_posterior.observation_shape == (5, 96)
+    assert posterior.observation_posterior.standard_deviation.shape == (5, 96)
+    assert posterior.observation_information is not None
+    assert posterior.observation_information.observation_shape == (5, 96)
+    assert posterior.observation_information.effective_observation_count > 0.0
+    assert len(posterior.observation_information.peak_index) == 2
 
 
 def test_custom_observation_operator_returns_expected_shape() -> None:

@@ -11,6 +11,7 @@ from spectral_packet_engine import (
     ProfileTable,
     TabularDataset,
     build_profile_table_report,
+    calibrate_potential_from_spectrum,
     design_potential_for_target_transition,
     export_feature_table_from_profile_table,
     fit_gaussian_packet_to_profile_table,
@@ -233,10 +234,14 @@ def test_inverse_artifacts_bundle_includes_uncertainty_outputs(tmp_path) -> None
     assert "parameter_posterior.csv" in report.files
     assert "modal_posterior.csv" in report.files
     assert "sensitivity_map.json" in report.files
+    assert "observation_posterior.json" in report.files
+    assert "observation_information.json" in report.files
     assert report.metadata["workflow"] == "fit-table"
     assert report.metadata["has_physical_inference"] is True
     assert uncertainty_payload["parameter_posterior"]["parameter_names"] == ["center", "width", "wavenumber"]
     assert sensitivity_payload["parameter_names"] == ["center", "width", "wavenumber"]
+    assert uncertainty_payload["observation_posterior"]["observation_shape"] == [3, 48]
+    assert uncertainty_payload["observation_information"]["observation_shape"] == [3, 48]
 
 
 def test_potential_inference_and_reduced_model_artifacts_follow_shared_bundle_contract(tmp_path) -> None:
@@ -265,6 +270,8 @@ def test_potential_inference_and_reduced_model_artifacts_follow_shared_bundle_co
     assert inference_report.complete is True
     assert "potential_family_inference.json" in inference_report.files
     assert "candidate_ranking.csv" in inference_report.files
+    assert "best_family_observation_posterior.json" in inference_report.files
+    assert "best_family_observation_information.json" in inference_report.files
     assert inference_report.metadata["workflow"] == "infer-potential-spectrum"
     assert inference_report.metadata["best_family"] == "harmonic"
 
@@ -298,6 +305,27 @@ def test_differentiable_and_vertical_artifacts_follow_shared_bundle_contract(tmp
         num_points=128,
         num_states=3,
     ).eigenvalues
+    calibration_summary = calibrate_potential_from_spectrum(
+        family="harmonic",
+        target_eigenvalues=target_spectrum,
+        initial_guess={"omega": 4.0},
+        num_points=128,
+        optimization_config=GradientOptimizationConfig(steps=120, learning_rate=0.04),
+        device="cpu",
+    )
+    calibration_dir = tmp_path / "calibration"
+    write_differentiable_artifacts(calibration_dir, calibration_summary)
+    calibration_report = inspect_artifact_directory(calibration_dir)
+
+    assert calibration_report.complete is True
+    assert "differentiable_summary.json" in calibration_report.files
+    assert "predicted_eigenvalues.csv" in calibration_report.files
+    assert "parameter_posterior.csv" in calibration_report.files
+    assert "sensitivity_map.json" in calibration_report.files
+    assert "observation_posterior.json" in calibration_report.files
+    assert "observation_information.json" in calibration_report.files
+    assert calibration_report.metadata["workflow"] == "calibrate-potential"
+
     target_transition = float((target_spectrum[1] - target_spectrum[0]).item())
     design_summary = design_potential_for_target_transition(
         family="harmonic",

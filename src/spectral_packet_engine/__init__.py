@@ -299,11 +299,8 @@ from spectral_packet_engine.inference import (
     EstimationConfig,
     GaussianPacketEstimator,
     ObservationMode,
-    ParameterPosteriorSummary,
     PhysicalInferenceSummary,
-    PosteriorConfig,
     ReconstructionResult,
-    SensitivityMapSummary,
 )
 from spectral_packet_engine.ml import (
     JAXModalRegressor,
@@ -490,6 +487,13 @@ from spectral_packet_engine.tf_surrogate import (
     configure_tensorflow_runtime,
     inspect_tensorflow_host,
     tensorflow_is_available,
+)
+from spectral_packet_engine.uq import (
+    ObservationInformationSummary,
+    ObservationPosteriorSummary,
+    ParameterPosteriorSummary,
+    PosteriorConfig,
+    SensitivityMapSummary,
 )
 from spectral_packet_engine.workflows import (
     CaptureModeBudget,
@@ -680,7 +684,9 @@ __all__ = list(
             "ModalSurrogateConfig",
             "ModalTrainingSummary",
             "ObservableGradientSummary",
+            "ObservationInformationSummary",
             "ObservationMode",
+            "ObservationPosteriorSummary",
             "CoefficientPosteriorSummary",
             "ParameterPosteriorSummary",
             "PacketControlOptimizationSummary",

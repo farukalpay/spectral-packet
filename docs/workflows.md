@@ -155,6 +155,8 @@ Expected outputs:
 - one local posterior summary over the inferred physical parameters,
 - one modal-coefficient posterior summary,
 - one sensitivity map bundle that shows which parts of the profile constrain which parameters,
+- one posterior-predictive interval summary over the observed density,
+- one observation-information map that shows where local Fisher information concentrates,
 - one predicted density table and artifact index.
 
 Artifact locations:
@@ -165,6 +167,8 @@ Artifact locations:
 - `artifacts/inverse_fit/parameter_posterior.csv`
 - `artifacts/inverse_fit/modal_posterior.csv`
 - `artifacts/inverse_fit/sensitivity_map.json`
+- `artifacts/inverse_fit/observation_posterior.json`
+- `artifacts/inverse_fit/observation_information.json`
 - `artifacts/inverse_fit/artifacts.json`
 
 What the user learns:
@@ -235,7 +239,7 @@ Expected outputs:
 
 - one ranking over candidate potential families,
 - one best-fit calibration summary,
-- local posterior and sensitivity outputs for the best family,
+- local posterior, sensitivity, and observation-information outputs for the best family,
 - one vertical artifact bundle with family-comparison provenance.
 
 Artifact locations:
@@ -244,6 +248,8 @@ Artifact locations:
 - `artifacts/spectroscopy/family_inference/potential_family_inference.json`
 - `artifacts/spectroscopy/family_inference/candidate_ranking.csv`
 - `artifacts/spectroscopy/family_inference/best_family_calibration.json`
+- `artifacts/spectroscopy/family_inference/best_family_observation_posterior.json`
+- `artifacts/spectroscopy/family_inference/best_family_observation_information.json`
 
 What the user learns:
 

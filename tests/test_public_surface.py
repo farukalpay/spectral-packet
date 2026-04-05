@@ -85,4 +85,6 @@ def test_top_level_all_is_deduplicated() -> None:
     assert "WorkflowGoal" in spe.__all__
     assert "DatabaseExecutionSummary" in spe.__all__
     assert "PotentialFamilyInferenceSummary" in spe.__all__
+    assert "ObservationPosteriorSummary" in spe.__all__
+    assert "ObservationInformationSummary" in spe.__all__
     assert "run_transport_resonance_workflow" in spe.__all__
