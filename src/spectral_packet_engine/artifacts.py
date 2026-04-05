@@ -83,7 +83,7 @@ def to_serializable(value: Any) -> Any:
         return {"real": to_serializable(value.real), "imag": to_serializable(value.imag)}
     if isinstance(value, Mapping):
         return {str(key): to_serializable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [to_serializable(item) for item in value]
     return value
 

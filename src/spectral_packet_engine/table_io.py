@@ -359,6 +359,48 @@ def tabular_dataset_from_profile_table(table: ProfileTable) -> TabularDataset:
     return TabularDataset(columns=columns)
 
 
+def _needs_transpose(header: list[str], rows: list[list[str]], time_column: str) -> bool:
+    """Detect a transposed layout where the first column holds numeric positions
+    and the remaining headers are string profile names.  In the canonical layout
+    the first header is *time_column* and the remaining headers are numeric
+    positions.  When both:
+      1. header[0] looks like a position label (e.g. 'x', 'position') and
+      2. none of header[1:] parse as floats, but all values in column-0 do
+    we conclude the table is transposed and should be flipped."""
+    first = header[0].strip().lower()
+    if first not in ("x", "position", "pos", "grid"):
+        return False
+    # Check that remaining headers are NOT numeric (i.e. they are profile names)
+    for h in header[1:]:
+        try:
+            float(h.strip())
+            return False  # at least one is numeric → not transposed
+        except ValueError:
+            continue
+    # Check that first-column values ARE numeric (positions)
+    for row in rows[:5]:
+        if not row:
+            continue
+        try:
+            float(row[0].strip())
+        except ValueError:
+            return False
+    return True
+
+
+def _transpose_rows(header: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """Transpose a table where rows are positions and columns are profiles
+    into the canonical layout where rows are profiles and columns are positions."""
+    profile_names = header[1:]  # string names become the "time" (sample) labels
+    positions = [row[0] for row in rows]  # first column → position headers
+    new_header = ["time"] + positions
+    new_rows: list[list[str]] = []
+    for col_idx, name in enumerate(profile_names):
+        new_row = [name] + [row[col_idx + 1] for row in rows]
+        new_rows.append(new_row)
+    return new_header, new_rows
+
+
 def _load_profile_table_delimited(
     path: str | Path,
     *,
@@ -375,22 +417,31 @@ def _load_profile_table_delimited(
 
         if len(header) < 2:
             raise ValueError("profile table must contain a time column and at least one position column")
-        if header[0].strip().lower() != time_column.lower():
-            raise ValueError(f"profile table must start with a '{time_column}' column")
 
-        position_grid = np.asarray([_parse_position_token(token) for token in header[1:]], dtype=np.float64)
-        sample_times: list[float] = []
-        profiles: list[list[float]] = []
+        raw_rows = [row for row in reader if row and not all(not cell.strip() for cell in row)]
 
-        for row_index, row in enumerate(reader, start=2):
-            if not row or all(not cell.strip() for cell in row):
-                continue
-            if len(row) != len(header):
-                raise ValueError(
-                    f"profile table row {row_index} has {len(row)} columns, expected {len(header)}"
-                )
+    # Auto-transpose: first column is positions, remaining columns are profiles
+    if _needs_transpose(header, raw_rows, time_column):
+        header, raw_rows = _transpose_rows(header, raw_rows)
+
+    if header[0].strip().lower() != time_column.lower():
+        raise ValueError(f"profile table must start with a '{time_column}' column")
+
+    position_grid = np.asarray([_parse_position_token(token) for token in header[1:]], dtype=np.float64)
+    sample_times: list[float] = []
+    profiles: list[list[float]] = []
+
+    for row_index, row in enumerate(raw_rows, start=2):
+        if len(row) != len(header):
+            raise ValueError(
+                f"profile table row {row_index} has {len(row)} columns, expected {len(header)}"
+            )
+        # time column: try float first, fall back to index for string labels
+        try:
             sample_times.append(float(row[0]))
-            profiles.append([float(cell) for cell in row[1:]])
+        except ValueError:
+            sample_times.append(float(row_index - 2))
+        profiles.append([float(cell) for cell in row[1:]])
 
     if not profiles:
         raise ValueError("profile table contains no data rows")

@@ -250,7 +250,9 @@ def test_high_level_physics_pipeline_and_nested_probe_run_when_available() -> No
 
     potential_payload, tunneling_payload, probe_payload = __import__("asyncio").run(_call())
     assert potential_payload["potential_name"] == "double_well"
+    assert "related_tools" in potential_payload
     assert tunneling_payload["num_modes"] == 48
+    assert "related_tools" in tunneling_payload
     assert "packet_mean_energy" in tunneling_payload["scattering"]
     assert "transmitted_probability" in tunneling_payload["propagation"]
     assert probe_payload["summary"]["failed_count"] == 0

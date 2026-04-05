@@ -69,9 +69,14 @@ from spectral_packet_engine.ml import (
 from spectral_packet_engine.mcp_runtime import MCPRuntimeReport, inspect_mcp_runtime
 from spectral_packet_engine.observables import total_probability
 from spectral_packet_engine.parametric_potentials import (
+    ArtifactField,
+    Citation,
+    DifferentiabilityInfo,
+    ParameterPrior,
     available_potential_families,
     default_parameter_mapping,
     describe_potential_families,
+    families_for_workflow,
 )
 from spectral_packet_engine.product import (
     DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
@@ -1364,10 +1369,18 @@ def execute_database_script(
     script: str,
     *,
     create_if_missing: bool = False,
+    max_length_chars: int = 500_000,
+    max_statements: int = 5_000,
+    timeout_seconds: float | None = None,
 ) -> DatabaseExecutionSummary:
     config = _coerce_database_config(database, create_if_missing=create_if_missing)
     with DatabaseConnection(config) as connection:
-        result = connection.execute_script(script)
+        result = connection.execute_script(
+            script,
+            max_length_chars=max_length_chars,
+            max_statements=max_statements,
+            timeout_seconds=timeout_seconds,
+        )
     return _summarize_database_execution(
         config,
         result.script,
@@ -1384,10 +1397,11 @@ def materialize_database_query(
     *,
     parameters: Mapping[str, Any] | None = None,
     create_if_missing: bool = False,
+    timeout_seconds: float | None = None,
 ) -> QueryResult:
     config = _coerce_database_config(database, create_if_missing=create_if_missing)
     with DatabaseConnection(config) as connection:
-        return connection.query(query, parameters=parameters)
+        return connection.query(query, parameters=parameters, timeout_seconds=timeout_seconds)
 
 
 def materialize_profile_table_from_database_query(
@@ -1562,12 +1576,14 @@ def pivot_database_table(
     aggregate: str = "MAX",
     replace: bool = False,
     create_if_missing: bool = True,
+    max_cardinality: int = 500,
 ) -> DatabaseMaterializationSummary:
     """Pivot a long-format table into wide format and persist the result."""
     config = _coerce_database_config(database, create_if_missing=create_if_missing)
     with DatabaseConnection(config) as connection:
         pivot_sql = connection.pivot_query(
-            table_name, index_column, pivot_column, value_column, aggregate=aggregate,
+            table_name, index_column, pivot_column, value_column,
+            aggregate=aggregate, max_cardinality=max_cardinality,
         )
         schema = connection.create_table_from_query(
             target_table, pivot_sql, replace=replace,
@@ -1590,12 +1606,13 @@ def unpivot_database_table(
     *,
     replace: bool = False,
     create_if_missing: bool = True,
+    max_columns: int = 200,
 ) -> DatabaseMaterializationSummary:
     """Unpivot (melt) a wide-format table into long format and persist."""
     config = _coerce_database_config(database, create_if_missing=create_if_missing)
     with DatabaseConnection(config) as connection:
         unpivot_sql = connection.unpivot_query(
-            table_name, id_columns, value_columns,
+            table_name, id_columns, value_columns, max_columns=max_columns,
         )
         schema = connection.create_table_from_query(
             target_table, unpivot_sql, replace=replace,
@@ -1619,12 +1636,13 @@ def interpolate_database_time_series(
     step: float = 1.0,
     replace: bool = False,
     create_if_missing: bool = True,
+    max_steps: int = 100_000,
 ) -> DatabaseMaterializationSummary:
     """Interpolate missing time steps in a time series and persist."""
     config = _coerce_database_config(database, create_if_missing=create_if_missing)
     with DatabaseConnection(config) as connection:
         interp_sql = connection.interpolate_time_series(
-            table_name, time_column, value_columns, step=step,
+            table_name, time_column, value_columns, step=step, max_steps=max_steps,
         )
         schema = connection.create_table_from_query(
             target_table, interp_sql, replace=replace,

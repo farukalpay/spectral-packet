@@ -71,6 +71,7 @@ For the shared hosted deployment, the public MCP endpoint is [https://lightcap.a
 ## Core Tool Families
 
 - environment and install inspection
+- intent-to-tool-chain planning
 - service status inspection
 - file-format and tabular capability inspection
 - profile-table report, analysis, compression, comparison, and inverse fitting
@@ -100,6 +101,12 @@ The MCP server now publishes machine-readable discovery surfaces in addition to 
 
 These exist so an MCP client can decide which spectral capability to call without inventing its own routing policy.
 
+Tool discovery is also embedded directly into the tool surface:
+
+- `plan_experiment` converts a short natural-language scientific intent into an ordered tool chain without filling parameter values.
+- every tool description is phrased as an intent trigger (`Use when ...`) instead of a bare implementation label.
+- every structured tool response includes `related_tools`, so a client can inspect adjacent next steps from the result payload itself.
+
 ### Analysis Pipelines (auto-parameterized, one-call)
 
 These are the highest-value MCP tools for data engineers and AI agents who don't want to specify every parameter. Each pipeline uses the library's own diagnostics to determine mode counts, energy ranges, and convergence thresholds automatically.
@@ -127,7 +134,7 @@ An AI client can say "analyze this profile CSV" and receive a complete structure
 | `transport_workflow` | Vertical workflow | one transport bundle spanning scattering, WKB, propagation, and Wigner diagnostics |
 | `profile_inference_workflow` | Vertical workflow | one nested bundle spanning report, inverse fit, and feature export |
 
-### Advanced Physics Tools (60+ tools total)
+### Advanced Physics Tools (100+ tools total)
 
 These tools expose the deep physics modules directly to AI clients:
 
@@ -186,6 +193,7 @@ The MCP server exposes the same runtime model as the rest of the product:
 
 - `inspect_product` for the shared product spine, runtime spine, and workflow map
 - `guide_workflow` for the recommended high-value loop and defaults for file-backed or SQL-backed work
+- `plan_experiment` for intent-to-tool-chain planning when the user gives a short experiment request
 - `inspect_environment` for machine capability inspection
 - `inspect_tree_backends` for sklearn-first and optional boosted-tree backend availability
 - `inspect_mcp_runtime` for transport, platform, bounded-execution, and logging policy inspection

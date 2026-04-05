@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Any
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -20,7 +21,10 @@ from spectral_packet_engine.differentiable_physics import (
 from spectral_packet_engine.parametric_potentials import (
     available_potential_families,
     default_parameter_mapping,
+    families_for_workflow,
+    resolve_potential_family,
 )
+from spectral_packet_engine.uq import IdentifiabilityAtlas, build_identifiability_atlas
 from spectral_packet_engine.pipelines import TunnelingExperimentReport, analyze_tunneling
 from spectral_packet_engine.runtime import inspect_torch_runtime
 from spectral_packet_engine.uq import PosteriorConfig
@@ -35,6 +39,8 @@ class PotentialFamilyCandidateSummary:
     residual_sum_squares: float
     information_criterion: float
     relative_evidence_weight: float
+    identifiability_atlas: Any | None = None
+    laplace_log_marginal_likelihood: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +95,7 @@ def infer_potential_family_from_spectrum(
     num_points: int = 128,
     optimization_config: GradientOptimizationConfig = GradientOptimizationConfig(),
     posterior_config: PosteriorConfig | None = PosteriorConfig(),
+    identifiability_starts: int = 0,
     device: str | torch.device = "auto",
 ) -> PotentialFamilyInferenceSummary:
     runtime = inspect_torch_runtime(device)
@@ -96,7 +103,7 @@ def infer_potential_family_from_spectrum(
     if target.numel() == 0:
         raise ValueError("target_eigenvalues must contain at least one value")
 
-    requested_families = tuple(families) if families is not None else available_potential_families()
+    requested_families = tuple(families) if families is not None else families_for_workflow("spectroscopy")
     if not requested_families:
         raise ValueError("at least one potential family must be provided")
 
@@ -114,6 +121,7 @@ def infer_potential_family_from_spectrum(
     calibrated_candidates: list[PotentialFamilyCandidateSummary] = []
     rss_values: list[float] = []
     bic_values: list[float] = []
+    lml_values: list[float | None] = []
     n_observations = max(int(target.numel()), 1)
     eps = torch.finfo(target.dtype).eps
 
@@ -144,6 +152,38 @@ def infer_potential_family_from_spectrum(
             n_observations * math.log((residual_sum_squares / n_observations) + float(eps))
             + parameter_count * math.log(float(n_observations))
         )
+
+        # Layer 2: identifiability atlas
+        atlas: IdentifiabilityAtlas | None = None
+        if identifiability_starts > 0:
+            family_def = resolve_potential_family(family)
+            starts: list[dict[str, float]] = []
+            for _ in range(identifiability_starts):
+                point: dict[str, float] = {}
+                for spec in family_def.parameter_specs:
+                    lb, ub = spec.resolved_bounds(domain)
+                    lo = float(lb.item()) if lb is not None else 0.1
+                    hi = float(ub.item()) if ub is not None else lo + 10.0
+                    point[spec.name] = lo + (hi - lo) * torch.rand(1).item()
+                starts.append(point)
+
+            def _atlas_calibrate(guess: Mapping[str, float]) -> tuple[dict[str, float], float]:
+                cal = calibrate_potential_from_spectrum(
+                    family=family, target_eigenvalues=target, initial_guess=guess,
+                    domain_length=domain_length, left=left, mass=mass, hbar=hbar,
+                    num_points=num_points, optimization_config=optimization_config,
+                    posterior_config=None, device=runtime.device,
+                )
+                return cal.estimated_parameters, cal.final_loss
+
+            atlas = build_identifiability_atlas(
+                parameter_names=family_def.parameter_names,
+                calibration_fn=_atlas_calibrate,
+                start_points=starts,
+            )
+
+        lml = calibration.laplace_evidence.log_marginal_likelihood if calibration.laplace_evidence is not None else None
+
         calibrated_candidates.append(
             PotentialFamilyCandidateSummary(
                 family=family,
@@ -151,15 +191,26 @@ def infer_potential_family_from_spectrum(
                 residual_sum_squares=residual_sum_squares,
                 information_criterion=bic,
                 relative_evidence_weight=0.0,
+                identifiability_atlas=atlas,
+                laplace_log_marginal_likelihood=lml,
             )
         )
         rss_values.append(residual_sum_squares)
         bic_values.append(bic)
+        lml_values.append(lml)
 
-    bic_tensor = torch.tensor(bic_values, dtype=target.dtype)
-    delta_bic = bic_tensor - torch.min(bic_tensor)
-    weights = torch.softmax(-0.5 * delta_bic, dim=0)
-    ordered_indices = torch.argsort(bic_tensor)
+    # Ranking: prefer Laplace evidence when available, fall back to BIC
+    use_laplace = all(v is not None for v in lml_values)
+    if use_laplace:
+        scores = torch.tensor([v for v in lml_values], dtype=target.dtype)
+        weights = torch.softmax(scores - torch.max(scores), dim=0)
+        ordered_indices = torch.argsort(scores, descending=True)
+    else:
+        bic_tensor = torch.tensor(bic_values, dtype=target.dtype)
+        delta_bic = bic_tensor - torch.min(bic_tensor)
+        weights = torch.softmax(-0.5 * delta_bic, dim=0)
+        ordered_indices = torch.argsort(bic_tensor)
+
     ordered_candidates = tuple(
         PotentialFamilyCandidateSummary(
             family=calibrated_candidates[int(index)].family,
@@ -167,20 +218,44 @@ def infer_potential_family_from_spectrum(
             residual_sum_squares=calibrated_candidates[int(index)].residual_sum_squares,
             information_criterion=calibrated_candidates[int(index)].information_criterion,
             relative_evidence_weight=float(weights[int(index)].item()),
+            identifiability_atlas=calibrated_candidates[int(index)].identifiability_atlas,
+            laplace_log_marginal_likelihood=calibrated_candidates[int(index)].laplace_log_marginal_likelihood,
         )
         for index in ordered_indices
     )
+
+    assumptions_list = [
+        "Family ranking uses the same differentiable bounded-domain eigensolver for each candidate potential family.",
+    ]
+    if use_laplace:
+        assumptions_list.append(
+            "Relative evidence weights are derived from the Laplace approximation to the log marginal likelihood, "
+            "which includes a natural Occam penalty via the curvature of the loss surface."
+        )
+    else:
+        assumptions_list.append(
+            "Relative evidence weights are derived from a BIC-style approximation and should be interpreted as "
+            "local model-comparison scores, not exact Bayesian model probabilities."
+        )
+    assumptions_list.append(
+        "Default initial guesses are minimal midpoint/scale seeds derived from parameter bounds when an explicit seed is not supplied."
+    )
+    if identifiability_starts > 0:
+        multimodal_families = [c.family for c in ordered_candidates if c.identifiability_atlas is not None and c.identifiability_atlas.multimodal]
+        if multimodal_families:
+            assumptions_list.append(
+                f"Multi-start analysis detected multiple basins for: {', '.join(multimodal_families)}. "
+                "Local posterior summaries may be unreliable for those families; consider sampling-based inference."
+            )
+        else:
+            assumptions_list.append("Multi-start analysis found a single basin for all families, supporting the local Laplace approximation.")
 
     return PotentialFamilyInferenceSummary(
         target_eigenvalues=target.detach(),
         candidates=ordered_candidates,
         best_family=ordered_candidates[0].family,
         family_weights={candidate.family: candidate.relative_evidence_weight for candidate in ordered_candidates},
-        assumptions=(
-            "Family ranking uses the same differentiable bounded-domain eigensolver for each candidate potential family.",
-            "Relative evidence weights are derived from a BIC-style approximation and should be interpreted as local model-comparison scores, not exact Bayesian model probabilities.",
-            "Default initial guesses are minimal midpoint/scale seeds derived from parameter bounds when an explicit seed is not supplied.",
-        ),
+        assumptions=tuple(assumptions_list),
     )
 
 
@@ -243,6 +318,9 @@ def run_transport_resonance_workflow(
     packet_wavenumber: float = 40.0,
     device: str = "cpu",
 ) -> TransportResonanceWorkflowSummary:
+    barrier_family_def = resolve_potential_family("gaussian-barrier")
+    if "transport" not in barrier_family_def.supported_workflows:
+        raise ValueError("gaussian-barrier family does not declare transport workflow support")
     report = analyze_tunneling(
         barrier_height=barrier_height,
         barrier_width_sigma=barrier_width_sigma,
@@ -256,7 +334,7 @@ def run_transport_resonance_workflow(
         device=device,
     )
     return TransportResonanceWorkflowSummary(
-        barrier_family="gaussian-barrier",
+        barrier_family=barrier_family_def.name,
         barrier_parameters={
             "height": float(barrier_height),
             "width_sigma": float(barrier_width_sigma),

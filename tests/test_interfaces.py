@@ -408,6 +408,7 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "guide_workflow" in by_name
     assert "inspect_environment" in by_name
     assert "inspect_service_status" in by_name
+    assert "plan_experiment" in by_name
     assert "inspect_environment_tool" not in by_name
     assert "profile_table_report" in by_name
     assert "inspect_tree_backends" in by_name
@@ -430,7 +431,10 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "transport_workflow" in by_name
     assert "profile_inference_workflow" in by_name
     assert by_name["inspect_environment"].description
+    assert by_name["plan_experiment"].description.startswith("Use when")
     assert by_name["query_database"].description
+    assert by_name["compute_wigner_function"].description.startswith("Use when")
+    assert "quantum or classical" in by_name["compute_wigner_function"].description
     assert "read-only" in by_name["query_database"].description
 
 
@@ -526,6 +530,42 @@ def test_mcp_runtime_and_artifact_tools_report_shared_runtime_state_when_availab
     assert runtime_payload["stderr_logging_safe"] is True
     assert artifact_payload["complete"] is True
     assert artifact_payload["metadata"]["workflow"] == "mcp-artifacts-test"
+
+
+def test_mcp_tool_planner_and_related_tools_are_exposed_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _inspect():
+        server = create_mcp_server()
+        _, wigner_payload = await server.call_tool(
+            "compute_wigner_function",
+            {
+                "center": 0.4,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "num_modes": 16,
+                "num_x_points": 16,
+                "num_p_points": 16,
+                "device": "cpu",
+            },
+        )
+        _, plan_payload = await server.call_tool(
+            "plan_experiment",
+            {"intent": "analyze quantum tunneling behavior thoroughly", "max_steps": 4},
+        )
+        return wigner_payload, plan_payload
+
+    wigner_payload, plan_payload = asyncio.run(_inspect())
+
+    assert "related_tools" in wigner_payload
+    assert "analyze_quantum_state_pipeline" in wigner_payload["related_tools"]
+    assert "tunneling_experiment" in plan_payload["anchor_tool"]
+    assert plan_payload["plan_steps"]
+    assert plan_payload["plan_steps"][0]["tool"] == "tunneling_experiment"
+    assert isinstance(plan_payload["plan_steps"][0]["parameter_template"], dict)
+    assert all(value is None for value in plan_payload["plan_steps"][0]["parameter_template"].values())
 
 
 def test_mcp_profile_report_tool_uses_shared_report_workflow_when_available(tmp_path) -> None:

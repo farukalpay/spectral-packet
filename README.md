@@ -274,12 +274,27 @@ New bundle patterns include:
 
 ## MCP
 
-The MCP server now exposes first-class tools for:
+### Hosted server
 
+A public MCP endpoint is available at:
+
+```
+https://lightcap.ai/mcp
+```
+
+Connect from Claude Desktop, Cursor, Windsurf, or any MCP-compatible client by adding the server URL to your MCP configuration. No installation or API key required.
+
+### Tools
+
+The MCP server exposes first-class tools for:
+
+- planning and routing: `plan_experiment`, `guide_workflow`,
 - inverse/UQ: `infer_potential_spectrum`, `fit_packet_to_profile_table`,
 - reduced models: `analyze_separable_spectrum`, `analyze_coupled_surfaces`, `solve_radial_reduction`,
 - differentiable physics: `design_transition`, `optimize_packet_control`,
-- vertical workflows: `transport_workflow`, `profile_inference_workflow`.
+- vertical workflows: `transport_workflow`, `profile_inference_workflow`,
+- data loading: `write_scratch_file`, `upload_csv_to_database`, `upload_csv_for_analysis`, `create_scratch_database`,
+- SQL workflows: `query_database`, `execute_database_script`, `materialize_query_table`.
 
 It also exposes structured capability resources:
 
@@ -287,6 +302,19 @@ It also exposes structured capability resources:
 - `spectral://capabilities/reduced-models`
 - `spectral://capabilities/differentiable-physics`
 - `spectral://capabilities/vertical-workflows`
+
+Tool descriptions are intent-oriented, and every MCP tool response includes `related_tools` so an agent can inspect adjacent next steps without hardcoded routing.
+
+### Self-hosting
+
+To run your own instance:
+
+```bash
+python3 -m pip install -e ".[mcp]"
+spectral-packet-engine mcp --transport streamable-http --port 8765
+```
+
+All security limits (rate limiting, query timeouts, database size caps, audit logging) are enabled by default. See `spectral-packet-engine mcp --help` for tunable parameters.
 
 See [docs/mcp.md](docs/mcp.md) and [docs/mcp-capabilities.md](docs/mcp-capabilities.md).
 

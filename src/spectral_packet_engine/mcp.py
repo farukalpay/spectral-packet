@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import importlib.util
 import json
 import sys
+import time as _time
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
-from threading import BoundedSemaphore
+from threading import BoundedSemaphore, Lock
 from time import perf_counter
 from typing import Any
 
@@ -45,6 +47,7 @@ from spectral_packet_engine.mcp_runtime import (
     inspect_mcp_runtime,
     resolve_mcp_scratch_file,
 )
+from spectral_packet_engine.tool_catalog import ToolCatalog
 from spectral_packet_engine.ml import ModalSurrogateConfig
 from spectral_packet_engine.config import SERVER_PURPOSE
 from spectral_packet_engine.product import (
@@ -198,6 +201,47 @@ def _managed_scratch_path(config: MCPServerConfig, name: str) -> Path:
     return resolve_mcp_scratch_file(name, config=config)
 
 
+# ---------------------------------------------------------------------------
+# Audit logging — records all write/delete operations on scratch files so
+# every deployment can trace who did what.  Runs transparently.
+# ---------------------------------------------------------------------------
+
+_audit_lock = Lock()
+
+
+def _audit_log(config: MCPServerConfig, operation: str, target: str, **extra: Any) -> None:
+    """Append one line to the scratch-directory audit log."""
+    scratch_dir = ensure_mcp_scratch_dir(config)
+    log_path = scratch_dir / "_audit.log"
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.gmtime())
+    parts = [ts, operation, target]
+    for k, v in extra.items():
+        parts.append(f"{k}={v}")
+    line = " | ".join(parts) + "\n"
+    with _audit_lock:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+_LOCAL_PATH_PREFIXES = ("/home/", "/tmp/", "/Users/", "/var/", "C:\\", "D:\\")
+
+
+def _check_not_local_path(path: str, tool_name: str) -> None:
+    """Raise a helpful error if *path* looks like a client-local path."""
+    for prefix in _LOCAL_PATH_PREFIXES:
+        if path.startswith(prefix):
+            scratch_hint = (
+                "The MCP server has its OWN filesystem — your local paths do not "
+                "exist here. To get your data onto the server:\n"
+                "  1. Use 'write_scratch_file' to upload inline content (CSV/JSON), then pass the returned path.\n"
+                "  2. Or use 'upload_csv_to_database' to load inline CSV directly into a database table.\n"
+                "  3. Or use 'create_scratch_database' with 'init_script' for SQL-based data loading."
+            )
+            raise FileNotFoundError(
+                f"{tool_name}: path {path!r} looks like a client-local path. {scratch_hint}"
+            )
+
+
 def _validate_synthetic_generation_request(config: MCPServerConfig, *, num_profiles: int, grid_points: int) -> None:
     if int(num_profiles) <= 0:
         raise ValueError("num_profiles must be positive")
@@ -269,6 +313,34 @@ class _MCPExecutionController:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
         self._semaphore = BoundedSemaphore(config.max_concurrent_tasks)
+        # Rate limiter: sliding window of call timestamps
+        self._call_timestamps: collections.deque[float] = collections.deque()
+        self._rate_lock = Lock()
+
+    def check_rate_limit(self) -> None:
+        """Enforce per-minute rate limit across all tool calls."""
+        limit = self.config.rate_limit_per_minute
+        if limit <= 0:
+            return
+        now = _time.monotonic()
+        window_start = now - 60.0
+        with self._rate_lock:
+            # Prune old entries
+            while self._call_timestamps and self._call_timestamps[0] < window_start:
+                self._call_timestamps.popleft()
+            if len(self._call_timestamps) >= limit:
+                raise RuntimeError(
+                    f"Rate limit exceeded: {limit} calls/minute. "
+                    f"Wait a moment before making more requests."
+                )
+            self._call_timestamps.append(now)
+
+    def count_scratch_databases(self) -> int:
+        """Count existing scratch database files."""
+        scratch_dir = self.config.scratch_directory_path
+        if not scratch_dir.exists():
+            return 0
+        return sum(1 for f in scratch_dir.iterdir() if f.suffix == ".db")
 
     def acquire(self) -> dict[str, float | int]:
         started = perf_counter()
@@ -298,10 +370,48 @@ def _tool_error_payload(tool_name: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-def _tool(server, runtime: _MCPExecutionController, name: str, description: str, *, bounded: bool = False):
+def _catalog_for_server(server) -> ToolCatalog | None:
+    return getattr(server, "_spectral_tool_catalog", None)
+
+
+def _augment_tool_payload(server, tool_name: str, payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    if "related_tools" in payload:
+        return payload
+    catalog = _catalog_for_server(server)
+    related_tools = () if catalog is None else catalog.related_tools(tool_name)
+    enriched = dict(payload)
+    enriched["related_tools"] = list(related_tools)
+    return enriched
+
+
+def _tool(
+    server,
+    runtime: _MCPExecutionController,
+    name: str,
+    description: str,
+    *,
+    bounded: bool = False,
+    intent_phrases: tuple[str, ...] = (),
+):
     def decorator(function):
+        catalog = _catalog_for_server(server)
+        resolved_description = description
+        if catalog is not None:
+            catalog.register(
+                name,
+                description,
+                function,
+                bounded=bounded,
+                intent_phrases=intent_phrases,
+            )
+            resolved_description = catalog.describe(name, description)
+
         @wraps(function)
         def wrapped(*args, **kwargs):
+            # Rate limiting — applies to every tool call
+            runtime.check_rate_limit()
             workflow = resolve_workflow_identity("mcp", name)
             metadata = {
                 "tool": name,
@@ -317,22 +427,22 @@ def _tool(server, runtime: _MCPExecutionController, name: str, description: str,
             ) as _task_id:
                 try:
                     if not bounded:
-                        return function(*args, **kwargs)
+                        return _augment_tool_payload(server, name, function(*args, **kwargs))
                     slot_info = runtime.acquire()
                     try:
                         result = function(*args, **kwargs)
                         if isinstance(result, dict) and bounded:
                             result["_execution"] = slot_info
-                        return result
+                        return _augment_tool_payload(server, name, result)
                     finally:
                         runtime.release()
                 except Exception as exc:
                     mark_service_task_failed(_task_id, exc)
-                    return _tool_error_payload(name, exc)
+                    return _augment_tool_payload(server, name, _tool_error_payload(name, exc))
 
         return server.tool(
             name=name,
-            description=description,
+            description=resolved_description,
             structured_output=True,
         )(wrapped)
 
@@ -361,22 +471,85 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         streamable_http_path=runtime_config.streamable_http_path,
         transport_security=_build_transport_security_settings(runtime_config),
     )
+    server._spectral_tool_catalog = ToolCatalog()
 
-    @_tool(server, runtime, "inspect_product", "Return engine identity: version, basis family, supported domains, and registered workflow map.")
+    @_tool(
+        server,
+        runtime,
+        "inspect_product",
+        "Return engine identity: version, basis family, supported domains, and registered workflow map.",
+        intent_phrases=(
+            "the user asks what this engine is for",
+            "the user needs the product spine or workflow map before choosing a tool",
+        ),
+    )
     def inspect_product_tool() -> dict[str, Any]:
         return to_serializable(inspect_product_identity())
 
-    @_tool(server, runtime, "guide_workflow", "Recommend a workflow (report, inverse-fit, or feature-export) with sensible defaults for the given input kind and goal.")
+    @_tool(
+        server,
+        runtime,
+        "guide_workflow",
+        "Recommend a workflow (report, inverse-fit, or feature-export) with sensible defaults for the given input kind and goal.",
+        intent_phrases=(
+            "the user wants the default product-level path for report, inverse-fit, or feature-model work",
+            "the user needs workflow guidance before calling lower-level tools",
+        ),
+    )
     def guide_workflow_tool(input_kind: str = "profile-table-file", goal: str = "report") -> dict[str, Any]:
         return to_serializable(guide_workflow(surface="mcp", input_kind=input_kind, goal=goal))
 
-    @_tool(server, runtime, "inspect_environment", "Report CPU/GPU availability, PyTorch device selection, thread counts, and optional backend status (TensorFlow, JAX, SQL).")
+    @_tool(
+        server,
+        runtime,
+        "plan_experiment",
+        "Translate a short natural-language scientific intent into a structured MCP tool chain without filling parameter values.",
+        intent_phrases=(
+            "the user gives a short experiment intent and wants a tool chain",
+            "the caller wants ordering guidance but will choose parameters separately",
+        ),
+    )
+    def plan_experiment_tool(intent: str, max_steps: int = 4) -> dict[str, Any]:
+        catalog = _catalog_for_server(server)
+        if catalog is None:
+            return {
+                "intent": intent,
+                "anchor_tool": None,
+                "plan_steps": [],
+                "considered_tools": [],
+                "notes": ["Tool catalog is unavailable, so no plan could be generated."],
+            }
+        return catalog.plan(intent, max_steps=max_steps).to_dict()
+
+    @_tool(
+        server,
+        runtime,
+        "inspect_environment",
+        "Report CPU/GPU availability, PyTorch device selection, thread counts, and optional backend status (TensorFlow, JAX, SQL).",
+        intent_phrases=(
+            "the user asks whether the machine is ready for spectral compute",
+            "the caller needs backend or device availability before running heavy tools",
+        ),
+    )
     def inspect_environment_tool(device: str = "auto") -> dict[str, Any]:
         return to_serializable(inspect_environment(device))
 
     @_tool(server, runtime, "inspect_mcp_runtime", "Report MCP transport config: host, port, allowed origins, bounded-execution concurrency limits, and log level.")
     def inspect_mcp_runtime_tool() -> dict[str, Any]:
-        return to_serializable(inspect_mcp_runtime(runtime_config))
+        report = to_serializable(inspect_mcp_runtime(runtime_config))
+        report["security_limits"] = {
+            "max_database_size_mb": runtime.config.max_database_size_mb,
+            "max_scratch_databases": runtime.config.max_scratch_databases,
+            "max_script_length_chars": runtime.config.max_script_length_chars,
+            "max_script_statements": runtime.config.max_script_statements,
+            "max_query_seconds": runtime.config.max_query_seconds,
+            "max_pivot_cardinality": runtime.config.max_pivot_cardinality,
+            "max_interpolation_steps": runtime.config.max_interpolation_steps,
+            "max_unpivot_columns": runtime.config.max_unpivot_columns,
+            "rate_limit_per_minute": runtime.config.rate_limit_per_minute,
+            "current_scratch_databases": runtime.count_scratch_databases(),
+        }
+        return report
 
     @_tool(server, runtime, "inspect_service_status", "Report uptime, completed/failed task counts, and recent tool execution history with timing.")
     def inspect_service_status_tool() -> dict[str, Any]:
@@ -543,6 +716,24 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "Keep the explanation tied to the spectral engine rather than generic ML language."
         )
 
+    @server.prompt(
+        name="data_loading_workflow",
+        description="How to get your local data onto the MCP server for analysis. Use this when you have CSV/tabular data locally.",
+    )
+    def data_loading_prompt(data_format: str = "CSV") -> str:
+        return (
+            "The MCP server has its OWN filesystem. Your local paths do NOT exist here.\n\n"
+            "FASTEST approaches (one call each):\n"
+            "  1. upload_csv_to_database(csv_content='...', table_name='mytable') — loads inline CSV into a SQLite table.\n"
+            "  2. upload_csv_for_analysis(csv_content='...') — saves CSV as a file, returns server path for profile tools.\n"
+            "  3. create_scratch_database(init_script='CREATE TABLE ...; INSERT ...;') — SQL-based setup.\n\n"
+            "WRONG approaches (will fail):\n"
+            "  - write_database_table(dataset_path='/home/you/file.csv') — path doesn't exist on server.\n"
+            "  - inspect_profile_table(table_path='/tmp/data.csv') — same problem.\n"
+            "  - bash: sqlite3 /path/to/db — you cannot access server files via bash.\n\n"
+            "After loading, use query_database to verify your data, then proceed with analysis tools."
+        )
+
     @_tool(server, runtime, "simulate_packet", "Simulate a Gaussian wavepacket in the infinite-well basis: project onto modes, propagate in time, and return grid-space snapshots with energy conservation diagnostics.", bounded=True)
     def simulate_packet_tool(
         center: float = 0.30,
@@ -595,11 +786,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             )
         )
 
-    @_tool(server, runtime, "inspect_profile_table", "Load a profile table file and report its grid dimensions, time slices, value ranges, and readiness for modal decomposition.")
+    @_tool(server, runtime, "inspect_profile_table", "Load a profile table file FROM THE SERVER and report its grid dimensions, time slices, value ranges, and readiness for modal decomposition. If your data is local, use write_scratch_file first to upload it.")
     def inspect_profile_table_tool(table_path: str, device: str = "auto") -> dict[str, Any]:
+        _check_not_local_path(table_path, "inspect_profile_table")
         return to_serializable(summarize_profile_table(load_profile_table(table_path), device=device))
 
-    @_tool(server, runtime, "profile_table_report", "Full pipeline on a profile table file: inspect schema, decompose into modal basis, compress, and return a unified report with convergence diagnostics.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "profile_table_report",
+        "Full pipeline on a profile table file FROM THE SERVER: inspect, decompose into modal basis, compress, return a unified report. If your data is local, use write_scratch_file first to upload it.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants the report-first path for one profile table",
+            "the user asks for modal decomposition and compression in one call",
+        ),
+    )
     def profile_table_report_tool(
         table_path: str,
         analyze_num_modes: int = DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
@@ -608,6 +810,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         normalize_each_profile: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
+        _check_not_local_path(table_path, "profile_table_report")
         report = load_profile_table_report(
             table_path,
             analyze_num_modes=analyze_num_modes,
@@ -947,7 +1150,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_differentiable_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "transport_workflow", "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "transport_workflow",
+        "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants an end-to-end tunneling, barrier, or resonance analysis",
+            "the caller wants the transport bundle instead of manually chaining scattering and propagation tools",
+        ),
+    )
     def transport_workflow_tool(
         barrier_height: float = 50.0,
         barrier_width_sigma: float = 0.03,
@@ -977,7 +1190,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_vertical_workflow_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "profile_inference_workflow", "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "profile_inference_workflow",
+        "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants report, inverse reconstruction, and feature export on the same profile table",
+            "the caller wants one tabular-science workflow instead of separate report and inverse steps",
+        ),
+    )
     def profile_inference_workflow_tool(
         table_path: str,
         center: float = 0.36,
@@ -1041,7 +1264,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def describe_database_table_tool(database: str, table_name: str) -> dict[str, Any]:
         return to_serializable(describe_database_table(database, table_name))
 
-    @_tool(server, runtime, "query_database", "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "query_database",
+        "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants to inspect or retrieve rows from a managed database",
+            "the caller needs read-only SQL access without shelling into SQLite",
+        ),
+    )
     def query_database_tool(
         database: str,
         query: str,
@@ -1049,7 +1282,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         max_rows: int = 500,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
-        result = materialize_database_query(database, query, parameters=_coerce_parameters(parameters))
+        result = materialize_database_query(
+            database, query,
+            parameters=_coerce_parameters(parameters),
+            timeout_seconds=runtime.config.max_query_seconds,
+        )
         if output_dir is not None:
             write_tabular_artifacts(
                 output_dir,
@@ -1090,7 +1327,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     ) -> dict[str, Any]:
         import io
         import csv as csv_mod
-        result = materialize_database_query(database, query, parameters=_coerce_parameters(parameters))
+        result = materialize_database_query(
+            database, query,
+            parameters=_coerce_parameters(parameters),
+            timeout_seconds=runtime.config.max_query_seconds,
+        )
         rows = result.dataset.to_rows()
         columns = list(result.dataset.column_names)
         buf = io.StringIO()
@@ -1111,7 +1352,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         statement: str,
         parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return to_serializable(
+        from spectral_packet_engine.database import check_database_file_size
+        result = to_serializable(
             execute_database_statement(
                 database,
                 statement,
@@ -1119,28 +1361,39 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 create_if_missing=True,
             )
         )
+        check_database_file_size(database, max_size_mb=runtime.config.max_database_size_mb)
+        _audit_log(runtime.config, "EXEC_STMT", database, statement=statement[:200])
+        return result
 
     @_tool(server, runtime, "execute_database_script", "Run a multi-statement SQL script against a managed SQLite database.", bounded=True)
     def execute_database_script_tool(
         database: str,
         script: str,
     ) -> dict[str, Any]:
-        return to_serializable(
+        from spectral_packet_engine.database import check_database_file_size
+        result = to_serializable(
             execute_database_script(
                 database,
                 script,
                 create_if_missing=True,
+                max_length_chars=runtime.config.max_script_length_chars,
+                max_statements=runtime.config.max_script_statements,
+                timeout_seconds=runtime.config.max_query_seconds,
             )
         )
+        check_database_file_size(database, max_size_mb=runtime.config.max_database_size_mb)
+        _audit_log(runtime.config, "EXEC_SCRIPT", database, length=len(script))
+        return result
 
-    @_tool(server, runtime, "write_database_table", "Load a tabular dataset from disk and write it into a database table.", bounded=True)
+    @_tool(server, runtime, "write_database_table", "Load a tabular dataset file FROM THE SERVER into a database table. The file must already be on the server (e.g. from write_scratch_file). For inline data, use upload_csv_to_database instead.", bounded=True)
     def write_database_table_tool(
         database: str,
         table_name: str,
         dataset_path: str,
         if_exists: str = "fail",
     ) -> dict[str, Any]:
-        return to_serializable(
+        _check_not_local_path(dataset_path, "write_database_table")
+        result = to_serializable(
             write_tabular_dataset_to_database(
                 database,
                 table_name,
@@ -1148,6 +1401,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 if_exists=if_exists,
             )
         )
+        _audit_log(runtime.config, "WRITE_TABLE", f"{database}/{table_name}", source=dataset_path)
+        return result
 
     @_tool(server, runtime, "materialize_query_table", "Run a query and persist its result as a managed database table.", bounded=True)
     def materialize_query_table_tool(
@@ -1192,6 +1447,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 database, table_name, target_table,
                 index_column, pivot_column, value_column,
                 aggregate=aggregate, replace=replace,
+                max_cardinality=runtime.config.max_pivot_cardinality,
             )
         )
 
@@ -1208,6 +1464,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             unpivot_database_table(
                 database, table_name, target_table,
                 id_columns, value_columns, replace=replace,
+                max_columns=runtime.config.max_unpivot_columns,
             )
         )
 
@@ -1226,6 +1483,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 database, table_name, target_table,
                 time_column, value_columns,
                 step=step, replace=replace,
+                max_steps=runtime.config.max_interpolation_steps,
             )
         )
 
@@ -1967,6 +2225,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_quantum_state_pipeline",
         "Analyze a Gaussian wavepacket in the infinite-well basis: eigenexpansion, energy/momentum expectation values, Heisenberg uncertainty product, spectral entropy, convergence diagnostics, and Wigner function negativity.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a full quantum-state diagnostic from packet parameters",
+            "the caller wants one wavepacket analysis instead of separate energy, uncertainty, and Wigner calls",
+        ),
     )
     def analyze_quantum_state_pipeline_tool(
         center: float = 0.30,
@@ -1998,6 +2260,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_potential_pipeline",
         "Analyze a 1D potential (harmonic, double-well, Morse, or custom): compute eigenvalues, compare against WKB semiclassical approximation, evaluate partition function, spectral zeta, and Weyl asymptotic law.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a broad spectral characterization of a potential family",
+            "the caller wants eigenvalues, semiclassical checks, and thermodynamic diagnostics together",
+        ),
     )
     def analyze_potential_pipeline_tool(
         potential: str = "harmonic",
@@ -2033,6 +2299,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_scattering_pipeline",
         "Full scattering analysis: transmission spectrum, resonances, S-matrix, WKB tunneling comparison — energy range auto-determined from barrier heights.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a scattering or barrier transmission analysis without picking every subtool",
+            "the caller asks about resonances, transmission spectra, or tunneling through a barrier",
+        ),
     )
     def analyze_scattering_pipeline_tool(
         barrier_type: str = "double",
@@ -2211,6 +2481,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "compute_wigner_function",
         "Compute the Wigner quasi-probability distribution W(x,p) for a Gaussian wavepacket. Returns negativity (non-classicality witness) and marginals.",
         bounded=True,
+        intent_phrases=(
+            "the user asks whether a state looks quantum or classical",
+            "the caller wants phase-space diagnostics, Wigner negativity, or non-classicality evidence",
+        ),
     )
     def compute_wigner_function_tool(
         center: float = 0.5,
@@ -2324,6 +2598,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "perturbation_analysis",
         "Apply quantum perturbation theory (1st and 2nd order) to analyze how a perturbation modifies energy levels of the infinite well.",
         bounded=True,
+        intent_phrases=(
+            "the user wants to see how a small perturbation changes energy levels",
+            "the caller asks whether perturbation theory is valid for a modified well",
+        ),
     )
     def perturbation_analysis_tool(
         perturbation_type: str = "linear_slope",
@@ -2369,6 +2647,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "wkb_analysis",
         "WKB semiclassical analysis: Bohr-Sommerfeld quantization and tunneling probability for 1D potentials.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a semiclassical comparison for spectra or tunneling",
+            "the caller asks for WKB, Bohr-Sommerfeld, or barrier transmission estimates",
+        ),
     )
     def wkb_analysis_tool(
         potential: str = "harmonic",
@@ -2553,6 +2835,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "scattering_analysis",
         "Compute quantum scattering through a potential barrier: transmission T(E), reflection R(E), resonances, and S-matrix unitarity.",
         bounded=True,
+        intent_phrases=(
+            "the user asks for transmission, reflection, or resonance structure through a barrier",
+            "the caller wants resolved scattering curves rather than a bundled workflow",
+        ),
     )
     def scattering_analysis_tool(
         barrier_type: str = "rectangular",
@@ -2591,6 +2877,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "berry_phase_analysis",
         "Compute the Berry (geometric) phase for a spin-½ system in a rotating magnetic field. Validates against the analytical solid-angle formula.",
         bounded=True,
+        intent_phrases=(
+            "the user asks about geometric phase, Berry phase, or adiabatic phase accumulation",
+            "the caller wants topology-style phase diagnostics for a closed parameter loop",
+        ),
     )
     def berry_phase_analysis_tool(
         theta: float = 0.6,
@@ -2701,6 +2991,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Returns a structured report with transmission coefficients, norm/energy conservation, "
         "and non-classicality witness.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a complete tunneling analysis from a short intent",
+            "the caller wants scattering, WKB, propagation, and Wigner diagnostics chained automatically",
+        ),
     )
     def tunneling_experiment_tool(
         barrier_height: float = 50.0,
@@ -3125,6 +3419,14 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         num_modes: int = 8,
         device: str = "cpu",
     ) -> dict[str, Any]:
+        from spectral_packet_engine.database import check_database_file_size
+        # Guard: limit number of scratch databases
+        existing_count = runtime.count_scratch_databases()
+        if existing_count >= runtime.config.max_scratch_databases:
+            raise RuntimeError(
+                f"Scratch database limit reached ({runtime.config.max_scratch_databases}). "
+                f"Delete unused databases before creating new ones."
+            )
         if populate_synthetic:
             _validate_synthetic_generation_request(
                 runtime.config,
@@ -3135,6 +3437,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
 
         # Bootstrap the database
         db_info = bootstrap_local_database(str(db_path))
+        _audit_log(runtime.config, "CREATE_DB", name)
         result: dict[str, Any] = {
             "database_path": str(db_path),
             "tables": list(db_info.tables) if hasattr(db_info, "tables") else [],
@@ -3144,6 +3447,9 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         if init_script is not None:
             script_result = execute_database_script(
                 str(db_path), init_script, create_if_missing=True,
+                max_length_chars=runtime.config.max_script_length_chars,
+                max_statements=runtime.config.max_script_statements,
+                timeout_seconds=runtime.config.max_query_seconds,
             )
             result["init_script"] = {
                 "statement_count": script_result.statement_count,
@@ -3151,6 +3457,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             # Refresh table list after init
             db_info_after = inspect_database(str(db_path))
             result["tables"] = list(db_info_after.tables) if hasattr(db_info_after, "tables") else []
+            # Check DB size after script execution
+            check_database_file_size(db_path, max_size_mb=runtime.config.max_database_size_mb)
 
         if populate_synthetic:
             table = generate_synthetic_profile_table(
@@ -3219,6 +3527,205 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 "num_profiles": num_profiles,
                 "grid_points": grid_points,
             }
+
+    @_tool(
+        server,
+        runtime,
+        "write_scratch_file",
+        "Write inline text content (CSV, JSON, SQL, etc.) to a file in the managed scratch "
+        "directory. Use this to upload data that you have in memory — the returned path can "
+        "then be passed to inspect_profile_table, profile_table_report, write_database_table, "
+        "or any tool that needs a file path. Files live on the MCP server, NOT on your local "
+        "filesystem. Max 5 MB per file.",
+        intent_phrases=(
+            "the user has inline CSV, JSON, or SQL content that must become a server-side file",
+            "the caller needs a scratch path before running a file-based MCP tool",
+        ),
+    )
+    def write_scratch_file_tool(
+        name: str,
+        content: str,
+    ) -> dict[str, Any]:
+        max_size = 5 * 1024 * 1024  # 5 MB
+        if len(content) > max_size:
+            raise ValueError(
+                f"Content is {len(content):,} bytes, exceeding the 5 MB limit. "
+                f"Split into smaller files or use create_scratch_database with init_script."
+            )
+        path = _managed_scratch_path(runtime.config, name)
+        path.write_text(content, encoding="utf-8")
+        _audit_log(runtime.config, "WRITE", name, size=len(content))
+        return {
+            "path": str(path),
+            "size_bytes": len(content),
+            "hint": (
+                "Use this path with inspect_profile_table, profile_table_report, "
+                "write_database_table, or any file-based tool."
+            ),
+        }
+
+    @_tool(
+        server,
+        runtime,
+        "read_scratch_file",
+        "Read a file from the managed scratch directory. Returns the text content. "
+        "Use this to retrieve previously written files or inspect generated outputs.",
+    )
+    def read_scratch_file_tool(
+        name: str,
+        max_lines: int = 500,
+    ) -> dict[str, Any]:
+        path = _managed_scratch_path(runtime.config, name)
+        if not path.exists():
+            available = [
+                f.name for f in path.parent.iterdir()
+                if f.is_file()
+            ] if path.parent.exists() else []
+            raise FileNotFoundError(
+                f"File {name!r} not found in scratch directory. "
+                f"Available files: {available}"
+            )
+        lines = path.read_text(encoding="utf-8").splitlines()
+        truncated = len(lines) > max_lines
+        return {
+            "path": str(path),
+            "total_lines": len(lines),
+            "truncated": truncated,
+            "content": "\n".join(lines[:max_lines]),
+        }
+
+    @_tool(
+        server,
+        runtime,
+        "list_scratch_files",
+        "List all files in the managed scratch directory with sizes.",
+    )
+    def list_scratch_files_tool() -> dict[str, Any]:
+        scratch_dir = ensure_mcp_scratch_dir(runtime.config)
+        files = []
+        total_size = 0
+        for f in sorted(scratch_dir.iterdir()):
+            if f.is_file():
+                size = f.stat().st_size
+                total_size += size
+                files.append({
+                    "name": f.name,
+                    "size_bytes": size,
+                    "size_human": f"{size / 1024:.1f} KB" if size < 1024 * 1024 else f"{size / (1024*1024):.1f} MB",
+                })
+        return {
+            "scratch_dir": str(scratch_dir),
+            "file_count": len(files),
+            "total_size_bytes": total_size,
+            "files": files,
+        }
+
+    # ================================================================
+    # Shortcut Tools — combine multiple steps into one call
+    # ================================================================
+
+    @_tool(
+        server,
+        runtime,
+        "upload_csv_to_database",
+        "Upload inline CSV text directly into a database table — ONE call instead of "
+        "write_scratch_file + write_database_table. Pass your CSV content as a string. "
+        "Creates the database if it doesn't exist. This is the FASTEST way to load "
+        "tabular data for analysis.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants to load inline CSV into SQLite in one step",
+            "the caller needs the fastest path from CSV text to a queryable database table",
+        ),
+    )
+    def upload_csv_to_database_tool(
+        csv_content: str,
+        database: str = "data.db",
+        table_name: str = "data",
+        if_exists: str = "replace",
+    ) -> dict[str, Any]:
+        from spectral_packet_engine.database import check_database_file_size
+        max_size = 5 * 1024 * 1024
+        if len(csv_content) > max_size:
+            raise ValueError(
+                f"CSV content is {len(csv_content):,} bytes, exceeding the 5 MB limit."
+            )
+        # Write CSV to scratch, load into DB
+        csv_filename = f"_upload_{table_name}.csv"
+        csv_path = _managed_scratch_path(runtime.config, csv_filename)
+        csv_path.write_text(csv_content, encoding="utf-8")
+        db_path = _managed_scratch_path(runtime.config, database)
+        try:
+            result = to_serializable(
+                write_tabular_dataset_to_database(
+                    str(db_path),
+                    table_name,
+                    load_tabular_dataset(str(csv_path)),
+                    if_exists=if_exists,
+                    create_if_missing=True,
+                )
+            )
+        finally:
+            csv_path.unlink(missing_ok=True)
+        check_database_file_size(db_path, max_size_mb=runtime.config.max_database_size_mb)
+        _audit_log(runtime.config, "UPLOAD_CSV_TO_DB", f"{database}/{table_name}", csv_size=len(csv_content))
+        result["database_path"] = str(db_path)
+        return result
+
+    @_tool(
+        server,
+        runtime,
+        "upload_csv_for_analysis",
+        "Upload inline CSV text as a profile table file, ready for inspect_profile_table "
+        "or profile_table_report. Returns the server-side path. CSV must have a header row. "
+        "This is the FASTEST way to run spectral analysis on your own data.",
+        intent_phrases=(
+            "the user has a CSV in memory and wants to run profile analysis without manual file management",
+            "the caller needs a server-side profile-table path from inline CSV text",
+        ),
+    )
+    def upload_csv_for_analysis_tool(
+        csv_content: str,
+        name: str = "profile.csv",
+    ) -> dict[str, Any]:
+        max_size = 5 * 1024 * 1024
+        if len(csv_content) > max_size:
+            raise ValueError(
+                f"CSV content is {len(csv_content):,} bytes, exceeding the 5 MB limit."
+            )
+        path = _managed_scratch_path(runtime.config, name)
+        path.write_text(csv_content, encoding="utf-8")
+        _audit_log(runtime.config, "UPLOAD_CSV", name, size=len(csv_content))
+        line_count = csv_content.count("\n")
+        return {
+            "path": str(path),
+            "size_bytes": len(csv_content),
+            "lines": line_count,
+            "next_steps": [
+                f"inspect_profile_table(table_path='{path}')",
+                f"profile_table_report(table_path='{path}')",
+            ],
+        }
+
+    @_tool(
+        server,
+        runtime,
+        "delete_scratch_file",
+        "Delete a file from the managed scratch directory to free space.",
+    )
+    def delete_scratch_file_tool(
+        name: str,
+    ) -> dict[str, Any]:
+        path = _managed_scratch_path(runtime.config, name)
+        if not path.exists():
+            raise FileNotFoundError(f"File {name!r} not found in scratch directory.")
+        size = path.stat().st_size
+        path.unlink()
+        _audit_log(runtime.config, "DELETE", name, freed_bytes=size)
+        return {
+            "deleted": name,
+            "freed_bytes": size,
+        }
 
     @_tool(
         server,
@@ -3533,6 +4040,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Return the MCP server's connection details, hostname, local IP, "
         "library version, and scratch directory path. Use this to verify "
         "which server you are connected to.",
+        intent_phrases=(
+            "the caller needs to verify which MCP server instance is connected",
+            "the user wants authoritative endpoint, scratch-directory, or bind-host facts",
+        ),
     )
     def server_info_tool() -> dict[str, Any]:
         import socket
