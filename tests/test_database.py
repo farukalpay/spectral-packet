@@ -13,6 +13,8 @@ from spectral_packet_engine import (
     compress_profile_table_from_database_query,
     database_profile_query_artifact_metadata,
     describe_database_table,
+    execute_database_script,
+    execute_database_statement,
     execute_database_query,
     inspect_database,
     materialize_database_query_to_table,
@@ -67,6 +69,44 @@ def test_materialize_database_query_rejects_attach_side_effects(tmp_path) -> Non
             database_path,
             "ATTACH DATABASE '/etc/passwd' AS stolen",
         )
+
+
+def test_database_execute_statement_and_script_are_explicit(tmp_path) -> None:
+    database_path = tmp_path / "commodities.sqlite"
+
+    script_summary = execute_database_script(
+        database_path,
+        """
+        CREATE TABLE IF NOT EXISTS war_commodities (
+            month_idx INTEGER PRIMARY KEY,
+            month_label TEXT,
+            brent_usd REAL
+        );
+        INSERT OR REPLACE INTO war_commodities VALUES
+            (1, '2026-01', 65.0),
+            (2, '2026-02', 69.4);
+        """,
+        create_if_missing=True,
+    )
+    statement_summary = execute_database_statement(
+        database_path,
+        """
+        INSERT OR REPLACE INTO war_commodities (month_idx, month_label, brent_usd)
+        VALUES (:month_idx, :month_label, :brent_usd)
+        """,
+        parameters={"month_idx": 3, "month_label": "2026-03", "brent_usd": 110.0},
+    )
+    query = materialize_database_query(
+        database_path,
+        'SELECT month_idx, month_label, brent_usd FROM "war_commodities" ORDER BY month_idx',
+    )
+
+    assert script_summary.mode == "script"
+    assert script_summary.statement_count == 2
+    assert statement_summary.mode == "statement"
+    assert statement_summary.row_count == 1
+    assert query.dataset.row_count == 3
+    assert query.dataset.columns["month_label"].tolist() == ["2026-01", "2026-02", "2026-03"]
 
 
 def test_database_crud_and_sql_backed_spectral_analysis(tmp_path) -> None:

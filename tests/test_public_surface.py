@@ -18,6 +18,8 @@ def test_grouped_public_surfaces_are_exposed() -> None:
     assert spe.interfaces.create_mcp_server is spe.create_mcp_server
     assert spe.interfaces.inspect_service_status is spe.inspect_service_status
     assert spe.build_profile_table_report is not None
+    assert spe.execute_database_script is not None
+    assert spe.execute_database_statement is not None
     assert spe.write_feature_table_artifacts is not None
     assert spe.train_tree_model is not None
     assert spe.tune_tree_model is not None
@@ -77,3 +79,4 @@ def test_top_level_all_is_deduplicated() -> None:
     assert "train_tree_model" in spe.__all__
     assert "tune_tree_model" in spe.__all__
     assert "WorkflowGoal" in spe.__all__
+    assert "DatabaseExecutionSummary" in spe.__all__

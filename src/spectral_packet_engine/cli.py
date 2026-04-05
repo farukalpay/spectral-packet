@@ -57,6 +57,8 @@ from spectral_packet_engine.workflows import (
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    execute_database_script,
+    execute_database_statement,
     evaluate_tensorflow_surrogate_on_profile_table,
     execute_database_query,
     export_feature_table_from_database_query,
@@ -477,10 +479,10 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers,
         "query-database",
         aliases=("db-query",),
-        help_text="Run a parameterized SQL query and materialize the result as a tabular dataset.",
+        help_text="Run a read-only parameterized SQL query and materialize the result as a tabular dataset.",
         description=(
-            "Execute a safe parameterized query against a SQLite path or database URL, then "
-            "return the result through the shared tabular dataset layer."
+            "Execute a safe read-only parameterized query against a SQLite path or database URL, "
+            "then return the result through the shared tabular dataset layer."
         ),
         epilog=(
             "Example:\n"
@@ -493,6 +495,43 @@ def build_parser() -> argparse.ArgumentParser:
     db_query_parser.add_argument("query", help="SQL statement to execute.")
     db_query_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     db_query_parser.add_argument("--output-dir", type=Path, default=None)
+
+    db_execute_parser = _add_command_parser(
+        subparsers,
+        "execute-database-statement",
+        aliases=("db-exec",),
+        help_text="Run a non-query SQL statement such as CREATE, INSERT, UPDATE, or DELETE.",
+        description=(
+            "Execute one explicit non-query SQL statement through the shared database workflow layer. "
+            "Use this for database mutations; keep db-query for read-only result sets."
+        ),
+        epilog=(
+            "Example:\n"
+            "  spectral-packet-engine db-exec artifacts/local.db "
+            "\"create table if not exists metrics (time real, value real)\""
+        ),
+    )
+    db_execute_parser.add_argument("database", help="SQLite file path or database URL.")
+    db_execute_parser.add_argument("statement", help="Single SQL statement to execute.")
+    db_execute_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
+
+    db_script_parser = _add_command_parser(
+        subparsers,
+        "execute-database-script",
+        aliases=("db-script",),
+        help_text="Run a multi-statement SQL script against a managed SQLite database.",
+        description=(
+            "Execute an explicit multi-statement SQL script through the shared database workflow layer. "
+            "This is intended for SQLite bootstrap or scratch-database setup flows."
+        ),
+        epilog=(
+            "Example:\n"
+            "  spectral-packet-engine db-script artifacts/local.db "
+            "\"create table if not exists metrics (time real, value real); insert into metrics values (0.0, 1.0);\""
+        ),
+    )
+    db_script_parser.add_argument("database", help="SQLite file path or database URL.")
+    db_script_parser.add_argument("script", help="SQL script to execute.")
 
     db_write_parser = subparsers.add_parser(
         "write-database-table",
@@ -1418,6 +1457,28 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                 ),
             )
         _emit(summarize_database_query_result(args.database, args.query, result, parameters=parameters))
+        return 0
+
+    if args.command in {"execute-database-statement", "db-exec"}:
+        parameters = _parse_key_value_items(args.param)
+        _emit(
+            execute_database_statement(
+                args.database,
+                args.statement,
+                parameters=parameters,
+                create_if_missing=True,
+            )
+        )
+        return 0
+
+    if args.command in {"execute-database-script", "db-script"}:
+        _emit(
+            execute_database_script(
+                args.database,
+                args.script,
+                create_if_missing=True,
+            )
+        )
         return 0
 
     if args.command in {"write-database-table", "db-write-table"}:

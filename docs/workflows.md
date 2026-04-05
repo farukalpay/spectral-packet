@@ -126,6 +126,49 @@ What the user learns:
 
 ## 4. CLI Batch Packet Sweep
 
+## 4. Explicit SQLite Setup Before SQL Query Workflows
+
+Input:
+
+- a local SQLite path,
+- an explicit SQL setup script for schema and seed rows,
+- a read-only query that consumes the resulting tables.
+
+Command:
+
+```bash
+spectral-packet-engine execute-database-script artifacts/war.sqlite '
+CREATE TABLE IF NOT EXISTS war_commodities (
+  month_idx INTEGER PRIMARY KEY,
+  month_label TEXT,
+  brent_usd REAL,
+  gold_usd REAL
+);
+INSERT OR REPLACE INTO war_commodities VALUES
+  (1, "2026-01", 65.0, 5400.0),
+  (2, "2026-02", 69.4, 5070.0);
+'
+spectral-packet-engine query-database artifacts/war.sqlite 'SELECT * FROM "war_commodities" ORDER BY month_idx'
+```
+
+Expected outputs:
+
+- one explicit execution summary for the setup script,
+- one read-only query summary over the seeded table,
+- no ambiguity about whether the SQL surface is mutating or read-only.
+
+Artifact locations:
+
+- optional: `query-database --output-dir ...` writes `db_query_summary.json`, `query_result.csv`, and `artifacts.json`
+
+What the user learns:
+
+- `query-database` is intentionally read-only,
+- schema creation and seed inserts belong to `execute-database-statement` or `execute-database-script`,
+- later SQL-backed spectral workflows can depend on an explicit, inspectable database-setup step.
+
+## 5. CLI Batch Packet Sweep
+
 Input:
 
 - several packet parameter tuples
@@ -158,7 +201,7 @@ What the user learns:
 - the backend can absorb parameter-sweep work,
 - the project is usable for repeated compute jobs, not only single demos.
 
-## 5. Backend-Aware ML Workflow
+## 6. Backend-Aware ML Workflow
 
 Input:
 
@@ -195,7 +238,7 @@ What the user learns:
 - PyTorch and JAX share one workflow surface,
 - surrogate workloads stay subordinate to the spectral engine instead of becoming a separate product.
 
-## 6. Spectral Feature Export And Tree Models
+## 7. Spectral Feature Export And Tree Models
 
 Status: beta. These workflows are integrated and artifact-backed, but they should still be treated as downstream spectral workflows rather than as a fully generalized tabular ML subsystem.
 

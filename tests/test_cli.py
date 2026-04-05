@@ -336,6 +336,33 @@ def test_cli_database_commands(tmp_path, capsys) -> None:
     assert payload["table"]["row_count"] == 3
     assert (query_dir / "query_result.csv").exists()
 
+    execute_statement = main(
+        [
+            "db-exec",
+            str(database_path),
+            'CREATE TABLE IF NOT EXISTS "scratch_metrics" (time REAL, value REAL)',
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert execute_statement == 0
+    assert payload["mode"] == "statement"
+    assert payload["statement_count"] == 1
+
+    execute_script = main(
+        [
+            "db-script",
+            str(database_path),
+            """
+            INSERT INTO "scratch_metrics" (time, value) VALUES (0.0, 1.0);
+            INSERT INTO "scratch_metrics" (time, value) VALUES (0.1, 2.0);
+            """,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert execute_script == 0
+    assert payload["mode"] == "script"
+    assert payload["statement_count"] == 2
+
     exit_code = main(
         [
             "db-materialize-query",

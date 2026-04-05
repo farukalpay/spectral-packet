@@ -311,18 +311,18 @@ After connecting, the agent should call `self_test`, then `server_info` to inspe
 
 `best_effort_ipv4` is observational only. `endpoint_url` is the internal listener URL on the server host. The published public MCP route is `https://lightcap.ai/mcp`.
 
-### What the MCP Server Offers (79 Tools In The Current Build)
+### What the MCP Server Offers
 
-| Category | Count | Highlights |
-| --- | --- | --- |
-| Environment & Status | 8 | `self_test`, `server_info`, `probe_mcp_runtime`, `inspect_product` |
-| Profile & Spectral | 12 | `profile_table_report`, `compress_profile_table`, `export_feature_table` |
-| Analysis Pipelines | 5 | `analyze_quantum_state_pipeline`, `analyze_potential_pipeline` |
-| Advanced Physics | 13 | `solve_eigenproblem`, `split_operator_propagate`, `scattering_analysis` |
-| Load Modeling | 5 | `analyze_server_load`, `compute_adaptive_throttle`, `detect_load_anomaly` |
-| Code Execution | 5 | `execute_python` (trusted opt-in only), `create_scratch_database`, `demo_spectral_pipeline` |
-| SQL Workflows | 8 | `bootstrap_database`, `query_database`, `report_database_profile_query` |
-| Tree Models | 5 | `train_tree_model`, `tune_tree_model`, `inspect_tree_backends` |
+| Category | Highlights |
+| --- | --- |
+| Environment & Status | `self_test`, `server_info`, `probe_mcp_runtime`, `inspect_product` |
+| Profile & Spectral | `profile_table_report`, `compress_profile_table`, `export_feature_table` |
+| Analysis Pipelines | `analyze_quantum_state_pipeline`, `analyze_potential_pipeline` |
+| Advanced Physics | `solve_eigenproblem`, `split_operator_propagate`, `scattering_analysis` |
+| Load Modeling | `analyze_server_load`, `compute_adaptive_throttle`, `detect_load_anomaly` |
+| Code Execution | `execute_python` (trusted opt-in only), `create_scratch_database`, `demo_spectral_pipeline` |
+| SQL Workflows | `bootstrap_database`, `query_database`, `execute_database_script`, `report_database_profile_query` |
+| Tree Models | `train_tree_model`, `tune_tree_model`, `inspect_tree_backends` |
 
 ### The Showcase Prompt
 
@@ -351,7 +351,7 @@ For a one-call deeper physics workflow, use `tunneling_experiment`. It now keeps
 - **"Generate synthetic profiles and analyze them"** — agent calls `generate_synthetic_profiles` then `analyze_spectral_profile_pipeline`
 - **"What's the optimal throttling for 80 req/s traffic?"** — agent calls `analyze_server_load`
 - **"Solve Schrodinger for a Morse potential"** — agent calls `solve_eigenproblem`, or `execute_python` only on a trusted runtime started with `--allow-unsafe-python`
-- **"Create a scratch database, fill it, and run a SQL query"** — agent calls `create_scratch_database` then `query_database`
+- **"Create a scratch database, populate it, and run a SQL query"** — agent calls `create_scratch_database`, then `execute_database_script` or `execute_database_statement`, then `query_database`
 - **"Run any Python code with the library"** — only on a trusted local runtime intentionally started with `--allow-unsafe-python`
 
 See [docs/mcp-usage-guide.md](docs/mcp-usage-guide.md) for detailed session examples.

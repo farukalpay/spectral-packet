@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from spectral_packet_engine.interfaces import inspect_service_status
-from spectral_packet_engine.service_status import _LOGGER, configure_service_logging, track_service_task
+from spectral_packet_engine.service_status import (
+    _LOGGER,
+    configure_service_logging,
+    inspect_service_status as inspect_service_status_runtime,
+    mark_service_task_failed,
+    track_service_task,
+)
 
 
 def test_service_status_tracks_running_and_completed_tasks() -> None:
@@ -39,6 +45,18 @@ def test_service_status_tracks_failed_tasks() -> None:
     assert after.counters.total_started >= before.counters.total_started + 1
     assert after.counters.total_failed >= before.counters.total_failed + 1
     assert any(task.name == "failing-test-task" and task.status == "failed" for task in after.recent_tasks)
+
+
+def test_service_status_can_mark_failed_without_raising() -> None:
+    before = inspect_service_status_runtime()
+
+    with track_service_task("handled-failure-task", interface="python") as task_id:
+        mark_service_task_failed(task_id, RuntimeError("handled boom"))
+
+    after = inspect_service_status_runtime()
+    assert after.counters.total_failed >= before.counters.total_failed + 1
+    assert after.counters.total_completed == before.counters.total_completed
+    assert any(task.name == "handled-failure-task" and task.status == "failed" for task in after.recent_tasks)
 
 
 def test_service_logger_does_not_propagate_to_root_by_default() -> None:

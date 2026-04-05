@@ -104,6 +104,24 @@ def _literal_sql(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _count_sql_statements(script: str) -> int:
+    statement_count = 0
+    buffer = ""
+    for line in str(script).splitlines():
+        buffer = f"{buffer}\n{line}" if buffer else line
+        candidate = buffer.strip()
+        if not candidate:
+            continue
+        if sqlite3.complete_statement(candidate):
+            if candidate.rstrip(";").strip():
+                statement_count += 1
+            buffer = ""
+    trailing = buffer.strip().rstrip(";").strip()
+    if trailing:
+        statement_count += 1
+    return statement_count
+
+
 def _normalize_sql_dtype(name: str) -> str:
     dtype = str(name).strip().upper()
     aliases = {
@@ -338,6 +356,19 @@ class QueryResult:
         return self.dataset.row_count
 
 
+@dataclass(frozen=True, slots=True)
+class StatementExecutionResult:
+    statement: str
+    parameters: dict[str, Any]
+    row_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptExecutionResult:
+    script: str
+    statement_count: int
+
+
 def _table_column_spec_from_python(name: str, values) -> TableColumnSpec:
     dtype_kind = values.dtype.kind
     if dtype_kind in {"i", "u"}:
@@ -560,17 +591,41 @@ class DatabaseConnection:
         statement: str,
         *,
         parameters: Mapping[str, Any] | None = None,
-    ) -> int:
+    ) -> StatementExecutionResult:
         self._ensure_connected()
         bound_parameters = {} if parameters is None else dict(parameters)
         if self.config.is_sqlite:
             cursor = self._sqlite_connection.execute(statement, bound_parameters)
             self._sqlite_connection.commit()
-            return int(cursor.rowcount if cursor.rowcount is not None else 0)
+            row_count = int(cursor.rowcount if cursor.rowcount is not None else 0)
+            return StatementExecutionResult(
+                statement=statement,
+                parameters=bound_parameters,
+                row_count=row_count,
+            )
         sqlalchemy = _require_sqlalchemy()
         with self._engine.begin() as connection:
             result = connection.execute(sqlalchemy.text(statement), bound_parameters)
-            return int(result.rowcount if result.rowcount is not None else 0)
+            row_count = int(result.rowcount if result.rowcount is not None else 0)
+            return StatementExecutionResult(
+                statement=statement,
+                parameters=bound_parameters,
+                row_count=row_count,
+            )
+
+    def execute_script(self, script: str) -> ScriptExecutionResult:
+        self._ensure_connected()
+        if not self.config.is_sqlite:
+            raise NotImplementedError(
+                "Multi-statement SQL scripts are only supported for SQLite connections. "
+                "Use execute() for a single statement on remote SQL backends."
+            )
+        self._sqlite_connection.executescript(script)
+        self._sqlite_connection.commit()
+        return ScriptExecutionResult(
+            script=script,
+            statement_count=_count_sql_statements(script),
+        )
 
     def create_table(
         self,
@@ -666,7 +721,7 @@ class DatabaseConnection:
         statement = f"DELETE FROM {normalized_name}"
         if where:
             statement += f" WHERE {where}"
-        return self.execute(statement, parameters=parameters)
+        return self.execute(statement, parameters=parameters).row_count
 
     def update_rows(
         self,
@@ -688,7 +743,7 @@ class DatabaseConnection:
         statement = f"UPDATE {normalized_name} SET {', '.join(assignments)}"
         if where:
             statement += f" WHERE {where}"
-        return self.execute(statement, parameters=bound_parameters)
+        return self.execute(statement, parameters=bound_parameters).row_count
 
     def write_dataset(
         self,
@@ -1096,6 +1151,8 @@ __all__ = [
     "DatabaseConfig",
     "DatabaseConnection",
     "QueryResult",
+    "ScriptExecutionResult",
+    "StatementExecutionResult",
     "TableColumnSpec",
     "TableSchemaSummary",
     "inspect_database_capabilities",

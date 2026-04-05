@@ -105,6 +105,46 @@ def test_managed_scratch_tools_reject_path_traversal_when_available() -> None:
     assert generate_payload["error_type"] == "ValueError"
 
 
+def test_database_script_execution_supports_sqlite_bootstrap_when_available(tmp_path) -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    database_path = tmp_path / "commodities.sqlite"
+
+    async def _call():
+        server = create_mcp_server()
+        _, script_payload = await server.call_tool(
+            "execute_database_script",
+            {
+                "database": str(database_path),
+                "script": """
+                CREATE TABLE IF NOT EXISTS war_commodities (
+                    month_idx INTEGER PRIMARY KEY,
+                    month_label TEXT,
+                    brent_usd REAL
+                );
+                INSERT OR REPLACE INTO war_commodities VALUES
+                    (1, '2026-01', 65.0),
+                    (2, '2026-02', 69.4);
+                """,
+            },
+        )
+        _, query_payload = await server.call_tool(
+            "query_database",
+            {
+                "database": str(database_path),
+                "query": 'SELECT month_idx, month_label, brent_usd FROM "war_commodities" ORDER BY month_idx',
+            },
+        )
+        return script_payload, query_payload
+
+    script_payload, query_payload = __import__("asyncio").run(_call())
+    assert script_payload["mode"] == "script"
+    assert script_payload["statement_count"] == 2
+    assert query_payload["table"]["row_count"] == 2
+
+
 def test_execute_python_can_be_enabled_explicitly_when_available() -> None:
     pytest.importorskip("mcp.server.fastmcp")
 

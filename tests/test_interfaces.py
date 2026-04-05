@@ -136,6 +136,31 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert db_query.json()["redacted_url"] == "sqlite:///:memory:"
 
     database_path = tmp_path / "profiles.sqlite"
+    db_execute = client.post(
+        "/database/execute",
+        json={
+            "database": str(database_path),
+            "statement": 'CREATE TABLE IF NOT EXISTS "api_metrics" (time REAL, value REAL)',
+        },
+    )
+    assert db_execute.status_code == 200
+    assert db_execute.json()["mode"] == "statement"
+    assert db_execute.json()["statement_count"] == 1
+
+    db_script = client.post(
+        "/database/script",
+        json={
+            "database": str(database_path),
+            "script": """
+            INSERT INTO "api_metrics" (time, value) VALUES (0.0, 1.0);
+            INSERT INTO "api_metrics" (time, value) VALUES (0.1, 2.0);
+            """,
+        },
+    )
+    assert db_script.status_code == 200
+    assert db_script.json()["mode"] == "script"
+    assert db_script.json()["statement_count"] == 2
+
     db_write = client.post(
         "/database/write",
         json={
@@ -386,6 +411,8 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "inspect_tree_backends" in by_name
     assert "export_feature_table" in by_name
     assert "export_feature_table_from_sql" in by_name
+    assert "execute_database_statement" in by_name
+    assert "execute_database_script" in by_name
     assert "train_tree_model" in by_name
     assert "tune_tree_model" in by_name
     assert "compress_database_profile_query" in by_name
@@ -394,6 +421,7 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "train_modal_surrogate_from_sql" in by_name
     assert by_name["inspect_environment"].description
     assert by_name["query_database"].description
+    assert "read-only" in by_name["query_database"].description
 
 
 def test_mcp_product_tool_reports_shared_identity_when_available() -> None:

@@ -58,6 +58,7 @@ from spectral_packet_engine.tabular import (
     xlsx_tabular_support_is_available,
 )
 from spectral_packet_engine.workflows import (
+    DatabaseExecutionSummary,
     DatabaseInspectionSummary,
     DatabaseMaterializationSummary,
     DatabaseProfileTableMaterialization,
@@ -71,6 +72,8 @@ from spectral_packet_engine.workflows import (
     database_profile_query_artifact_metadata,
     database_query_artifact_metadata,
     describe_database_table,
+    execute_database_script,
+    execute_database_statement,
     execute_database_query,
     export_feature_table_from_database_query,
     export_feature_table_from_profile_table,
@@ -92,6 +95,7 @@ __all__ = [
     "DatabaseCapabilityReport",
     "DatabaseConfig",
     "DatabaseConnection",
+    "DatabaseExecutionSummary",
     "DatabaseInspectionSummary",
     "DatabaseMaterializationSummary",
     "DatabaseProfileTableMaterialization",
@@ -119,6 +123,8 @@ __all__ = [
     "database_query_artifact_metadata",
     "describe_database_table",
     "excel_support_is_available",
+    "execute_database_script",
+    "execute_database_statement",
     "execute_database_query",
     "export_feature_table_from_database_query",
     "export_feature_table_from_profile_table",

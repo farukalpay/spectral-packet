@@ -55,6 +55,7 @@ from spectral_packet_engine.product import (
 from spectral_packet_engine.service_status import (
     configure_service_logging,
     inspect_service_status,
+    mark_service_task_failed,
     track_service_task,
 )
 from spectral_packet_engine.synthetic_profiles import generate_synthetic_profile_table
@@ -73,6 +74,8 @@ from spectral_packet_engine.workflows import (
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    execute_database_script,
+    execute_database_statement,
     export_feature_table_from_database_query,
     export_feature_table_from_profile_table,
     evaluate_modal_surrogate_from_database_query,
@@ -270,17 +273,13 @@ class _MCPExecutionController:
         self._semaphore.release()
 
 
-class ToolExecutionError(RuntimeError):
-    """Raised when an MCP tool fails during execution.
-
-    Propagates through track_service_task so the service tracker records
-    the task as 'failed' rather than 'completed'.
-    """
-
-    def __init__(self, tool_name: str, cause: Exception):
-        self.tool_name = tool_name
-        self.cause = cause
-        super().__init__(f"Error executing tool {tool_name}: {cause}")
+def _tool_error_payload(tool_name: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "error": True,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "tool": tool_name,
+    }
 
 
 def _tool(server, runtime: _MCPExecutionController, name: str, description: str, *, bounded: bool = False):
@@ -312,7 +311,8 @@ def _tool(server, runtime: _MCPExecutionController, name: str, description: str,
                     finally:
                         runtime.release()
                 except Exception as exc:
-                    raise ToolExecutionError(name, exc) from exc
+                    mark_service_task_failed(_task_id, exc)
+                    return _tool_error_payload(name, exc)
 
         return server.tool(
             name=name,
@@ -612,7 +612,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def describe_database_table_tool(database: str, table_name: str) -> dict[str, Any]:
         return to_serializable(describe_database_table(database, table_name))
 
-    @_tool(server, runtime, "query_database", "Run a parameterized SQL query and return a tabular summary of the result.", bounded=True)
+    @_tool(server, runtime, "query_database", "Run a read-only parameterized SQL query and return a tabular summary of the result.", bounded=True)
     def query_database_tool(
         database: str,
         query: str,
@@ -639,6 +639,34 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 query,
                 result,
                 parameters=_coerce_parameters(parameters),
+            )
+        )
+
+    @_tool(server, runtime, "execute_database_statement", "Run a non-query SQL statement such as CREATE, INSERT, UPDATE, or DELETE against a managed database.", bounded=True)
+    def execute_database_statement_tool(
+        database: str,
+        statement: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            execute_database_statement(
+                database,
+                statement,
+                parameters=_coerce_parameters(parameters),
+                create_if_missing=True,
+            )
+        )
+
+    @_tool(server, runtime, "execute_database_script", "Run a multi-statement SQL script against a managed SQLite database.", bounded=True)
+    def execute_database_script_tool(
+        database: str,
+        script: str,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            execute_database_script(
+                database,
+                script,
+                create_if_missing=True,
             )
         )
 

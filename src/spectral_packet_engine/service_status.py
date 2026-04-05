@@ -170,6 +170,58 @@ class _ServiceTaskRegistry:
         self._total_completed = 0
         self._total_failed = 0
 
+    def _finalize_task(
+        self,
+        task_id: str,
+        *,
+        status: TaskStatus,
+        error: str | None = None,
+    ) -> ServiceTaskStatusRecord | None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("status must be 'completed' or 'failed'")
+        with self._lock:
+            active_record = self._active.pop(task_id, None)
+            if active_record is None:
+                return None
+            started_monotonic = float(active_record.pop("_started_monotonic"))
+            summary = ServiceTaskStatusRecord(
+                task_id=task_id,
+                name=str(active_record["name"]),
+                interface=active_record["interface"],
+                workflow_id=active_record["workflow_id"],
+                surface_action=active_record["surface_action"],
+                status=status,
+                started_at_utc=str(active_record["started_at_utc"]),
+                finished_at_utc=_isoformat_utc(_utc_now()),
+                duration_seconds=float(perf_counter() - started_monotonic),
+                error=error,
+                metadata=dict(active_record["metadata"]),
+            )
+            self._recent.appendleft(summary)
+            if status == "completed":
+                self._total_completed += 1
+            else:
+                self._total_failed += 1
+        _log_service_event(
+            f"service_task_{status}",
+            level=logging.INFO if status == "completed" else logging.ERROR,
+            task_id=task_id,
+            name=summary.name,
+            interface=summary.interface,
+            workflow_id=summary.workflow_id,
+            surface_action=summary.surface_action,
+            duration_seconds=summary.duration_seconds,
+            error=summary.error,
+        )
+        return summary
+
+    def mark_failed(self, task_id: str, exc: Exception) -> ServiceTaskStatusRecord | None:
+        return self._finalize_task(
+            task_id,
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
     @contextmanager
     def track(
         self,
@@ -198,6 +250,7 @@ class _ServiceTaskRegistry:
             "duration_seconds": None,
             "error": None,
             "metadata": normalized_metadata,
+            "_started_monotonic": started_monotonic,
         }
         with self._lock:
             self._active[task_id] = active_record
@@ -215,69 +268,32 @@ class _ServiceTaskRegistry:
         try:
             yield task_id
         except Exception as exc:
-            summary = ServiceTaskStatusRecord(
-                task_id=task_id,
-                name=str(name),
-                interface=None if interface is None else str(interface),
-                workflow_id=normalized_workflow_id,
-                surface_action=normalized_surface_action,
+            self._finalize_task(
+                task_id,
                 status="failed",
-                started_at_utc=_isoformat_utc(started_at),
-                finished_at_utc=_isoformat_utc(_utc_now()),
-                duration_seconds=float(perf_counter() - started_monotonic),
                 error=f"{type(exc).__name__}: {exc}",
-                metadata=normalized_metadata,
-            )
-            with self._lock:
-                self._active.pop(task_id, None)
-                self._recent.appendleft(summary)
-                self._total_failed += 1
-            _log_service_event(
-                "service_task_failed",
-                level=logging.ERROR,
-                task_id=task_id,
-                name=name,
-                interface=interface,
-                workflow_id=normalized_workflow_id,
-                surface_action=normalized_surface_action,
-                duration_seconds=summary.duration_seconds,
-                error=summary.error,
             )
             raise
         else:
-            summary = ServiceTaskStatusRecord(
-                task_id=task_id,
-                name=str(name),
-                interface=None if interface is None else str(interface),
-                workflow_id=normalized_workflow_id,
-                surface_action=normalized_surface_action,
-                status="completed",
-                started_at_utc=_isoformat_utc(started_at),
-                finished_at_utc=_isoformat_utc(_utc_now()),
-                duration_seconds=float(perf_counter() - started_monotonic),
-                error=None,
-                metadata=normalized_metadata,
-            )
-            with self._lock:
-                self._active.pop(task_id, None)
-                self._recent.appendleft(summary)
-                self._total_completed += 1
-            _log_service_event(
-                "service_task_completed",
-                level=logging.INFO,
-                task_id=task_id,
-                name=name,
-                interface=interface,
-                workflow_id=normalized_workflow_id,
-                surface_action=normalized_surface_action,
-                duration_seconds=summary.duration_seconds,
-            )
+            self._finalize_task(task_id, status="completed")
 
     def snapshot(self, *, recent_limit: int = 10) -> ServiceStatusReport:
         limit = max(0, int(recent_limit))
         with self._lock:
             active_tasks = tuple(
-                ServiceTaskStatusRecord(**record)
+                ServiceTaskStatusRecord(
+                    task_id=record["task_id"],
+                    name=record["name"],
+                    interface=record["interface"],
+                    workflow_id=record["workflow_id"],
+                    surface_action=record["surface_action"],
+                    status=record["status"],
+                    started_at_utc=record["started_at_utc"],
+                    finished_at_utc=record["finished_at_utc"],
+                    duration_seconds=record["duration_seconds"],
+                    error=record["error"],
+                    metadata=record["metadata"],
+                )
                 for record in sorted(self._active.values(), key=lambda item: item["started_at_utc"])
             )
             recent_tasks = tuple(list(self._recent)[:limit])
@@ -330,11 +346,16 @@ def track_service_task(
         yield task_id
 
 
+def mark_service_task_failed(task_id: str, exc: Exception) -> None:
+    _REGISTRY.mark_failed(task_id, exc)
+
+
 __all__ = [
     "ServiceStatusReport",
     "ServiceTaskCounters",
     "ServiceTaskStatusRecord",
     "configure_service_logging",
     "inspect_service_status",
+    "mark_service_task_failed",
     "track_service_task",
 ]

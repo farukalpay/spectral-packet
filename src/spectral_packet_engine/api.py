@@ -52,6 +52,8 @@ from spectral_packet_engine.workflows import (
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    execute_database_script,
+    execute_database_statement,
     evaluate_modal_surrogate_from_database_query,
     evaluate_modal_surrogate_on_profile_table,
     evaluate_tensorflow_surrogate_on_profile_table,
@@ -165,6 +167,15 @@ def create_api_app():
         table_name: str
         dataset: TabularDatasetPayload
         if_exists: Literal["fail", "replace", "append"] = "fail"
+
+    class DatabaseExecuteRequest(BaseModel):
+        database: str
+        statement: str
+        parameters: dict[str, object] = Field(default_factory=dict)
+
+    class DatabaseScriptRequest(BaseModel):
+        database: str
+        script: str
 
     class DatabaseMaterializeRequest(BaseModel):
         database: str
@@ -537,6 +548,27 @@ def create_api_app():
                 request.query,
                 result,
                 parameters=request.parameters,
+            )
+        )
+
+    @app.post("/database/execute")
+    def database_execute(request: DatabaseExecuteRequest):
+        return to_serializable(
+            execute_database_statement(
+                request.database,
+                request.statement,
+                parameters=request.parameters,
+                create_if_missing=True,
+            )
+        )
+
+    @app.post("/database/script")
+    def database_script(request: DatabaseScriptRequest):
+        return to_serializable(
+            execute_database_script(
+                request.database,
+                request.script,
+                create_if_missing=True,
             )
         )
 

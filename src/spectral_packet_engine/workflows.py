@@ -560,6 +560,16 @@ class DatabaseQuerySummary:
 
 
 @dataclass(frozen=True, slots=True)
+class DatabaseExecutionSummary:
+    redacted_url: str
+    statement: str
+    parameters: dict[str, Any]
+    row_count: int | None
+    statement_count: int
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
 class DatabaseWriteSummary:
     redacted_url: str
     table_name: str
@@ -1246,6 +1256,64 @@ def execute_database_query(
             result,
             parameters=parameters,
         )
+
+
+def _summarize_database_execution(
+    config: DatabaseConfig,
+    statement: str,
+    *,
+    parameters: Mapping[str, Any] | None,
+    row_count: int | None,
+    statement_count: int,
+    mode: str,
+) -> DatabaseExecutionSummary:
+    return DatabaseExecutionSummary(
+        redacted_url=config.redacted_url,
+        statement=statement,
+        parameters={} if parameters is None else dict(parameters),
+        row_count=row_count,
+        statement_count=statement_count,
+        mode=mode,
+    )
+
+
+def execute_database_statement(
+    database: DatabaseConfig | str | Any,
+    statement: str,
+    *,
+    parameters: Mapping[str, Any] | None = None,
+    create_if_missing: bool = False,
+) -> DatabaseExecutionSummary:
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        result = connection.execute(statement, parameters=parameters)
+    return _summarize_database_execution(
+        config,
+        result.statement,
+        parameters=result.parameters,
+        row_count=result.row_count,
+        statement_count=1,
+        mode="statement",
+    )
+
+
+def execute_database_script(
+    database: DatabaseConfig | str | Any,
+    script: str,
+    *,
+    create_if_missing: bool = False,
+) -> DatabaseExecutionSummary:
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        result = connection.execute_script(script)
+    return _summarize_database_execution(
+        config,
+        result.script,
+        parameters=None,
+        row_count=None,
+        statement_count=result.statement_count,
+        mode="script",
+    )
 
 
 def materialize_database_query(
@@ -2497,6 +2565,7 @@ def simulate_packet_sweep(
 
 __all__ = [
     "CaptureModeBudget",
+    "DatabaseExecutionSummary",
     "DatabaseInspectionSummary",
     "DatabaseProfileTableMaterialization",
     "DatabaseQuerySummary",
@@ -2537,6 +2606,8 @@ __all__ = [
     "database_profile_query_artifact_metadata",
     "database_query_artifact_metadata",
     "describe_database_table",
+    "execute_database_script",
+    "execute_database_statement",
     "execute_database_query",
     "evaluate_modal_surrogate_from_database_query",
     "evaluate_modal_surrogate_on_profile_table",

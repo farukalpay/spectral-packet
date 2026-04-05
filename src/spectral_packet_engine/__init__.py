@@ -485,6 +485,7 @@ from spectral_packet_engine.tf_surrogate import (
 )
 from spectral_packet_engine.workflows import (
     CaptureModeBudget,
+    DatabaseExecutionSummary,
     DatabaseInspectionSummary,
     DatabaseMaterializationSummary,
     DatabaseProfileTableMaterialization,
@@ -525,6 +526,8 @@ from spectral_packet_engine.workflows import (
     database_profile_query_artifact_metadata,
     database_query_artifact_metadata,
     describe_database_table,
+    execute_database_script,
+    execute_database_statement,
     execute_database_query,
     evaluate_modal_surrogate_from_database_query,
     evaluate_modal_surrogate_on_profile_table,
@@ -576,6 +579,7 @@ __all__ = list(
             "DatabaseCapabilityReport",
             "DatabaseConfig",
             "DatabaseConnection",
+            "DatabaseExecutionSummary",
             "DatabaseInspectionSummary",
             "DatabaseMaterializationSummary",
             "DatabaseProfileTableMaterialization",
@@ -731,6 +735,8 @@ __all__ = list(
             "describe_database_table",
             "database_profile_query_artifact_metadata",
             "database_query_artifact_metadata",
+            "execute_database_script",
+            "execute_database_statement",
             "eigenenergy",
             "eigenenergies",
             "excel_support_is_available",

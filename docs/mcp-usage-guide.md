@@ -95,20 +95,20 @@ Once connected, the AI agent should call `self_test` to verify the server is ful
 
 Important runtime rule: `execute_python` is disabled by default. Only use the examples below when the operator intentionally started the server with `--allow-unsafe-python` for a trusted local session.
 
-## Tool Overview (79 Tools In The Current Build)
+## Tool Overview
 
-| Category | Tool Count | Key Tools |
-| --- | --- | --- |
-| Environment & Status | 8 | `inspect_product`, `inspect_environment`, `validate_installation`, `self_test`, `server_info`, `probe_mcp_runtime` |
-| Profile Table Workflows | 12 | `profile_table_report`, `compress_profile_table`, `fit_packet_to_profile_table` |
-| SQL-Backed Workflows | 8 | `bootstrap_database`, `query_database`, `report_database_profile_query` |
-| Spectral Feature & Tree | 5 | `export_feature_table`, `train_tree_model`, `tune_tree_model` |
-| Analysis Pipelines | 5 | `analyze_quantum_state_pipeline`, `analyze_potential_pipeline`, `analyze_scattering_pipeline` |
-| Advanced Physics | 13 | `solve_eigenproblem`, `split_operator_propagate`, `compute_wigner_function`, etc. |
-| Load Modeling | 5 | `analyze_server_load`, `compute_adaptive_throttle`, `detect_load_anomaly` |
-| Code Execution & Scratch | 5 | `execute_python` (trusted opt-in), `create_scratch_database`, `generate_synthetic_profiles`, `demo_spectral_pipeline` |
-| Artifact Inspection | 1 | `list_artifacts` |
-| Audit | 1 | `write_audit_log` |
+| Category | Key Tools |
+| --- | --- |
+| Environment & Status | `inspect_product`, `inspect_environment`, `validate_installation`, `self_test`, `server_info`, `probe_mcp_runtime` |
+| Profile Table Workflows | `profile_table_report`, `compress_profile_table`, `fit_packet_to_profile_table` |
+| SQL-Backed Workflows | `bootstrap_database`, `query_database`, `execute_database_script`, `report_database_profile_query` |
+| Spectral Feature & Tree | `export_feature_table`, `train_tree_model`, `tune_tree_model` |
+| Analysis Pipelines | `analyze_quantum_state_pipeline`, `analyze_potential_pipeline`, `analyze_scattering_pipeline` |
+| Advanced Physics | `solve_eigenproblem`, `split_operator_propagate`, `compute_wigner_function`, etc. |
+| Load Modeling | `analyze_server_load`, `compute_adaptive_throttle`, `detect_load_anomaly` |
+| Code Execution & Scratch | `execute_python` (trusted opt-in), `create_scratch_database`, `generate_synthetic_profiles`, `demo_spectral_pipeline` |
+| Artifact Inspection | `list_artifacts` |
+| Audit | `write_audit_log` |
 
 ## Example Sessions
 
