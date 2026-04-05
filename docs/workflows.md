@@ -155,6 +155,8 @@ Expected outputs:
 - one local posterior summary over the inferred physical parameters,
 - one modal-coefficient posterior summary,
 - one sensitivity map bundle that shows which parts of the profile constrain which parameters,
+- one posterior-predictive interval summary over the observed density,
+- one observation-information map that shows where local Fisher information concentrates,
 - one predicted density table and artifact index.
 
 Artifact locations:
@@ -165,6 +167,8 @@ Artifact locations:
 - `artifacts/inverse_fit/parameter_posterior.csv`
 - `artifacts/inverse_fit/modal_posterior.csv`
 - `artifacts/inverse_fit/sensitivity_map.json`
+- `artifacts/inverse_fit/observation_posterior.json`
+- `artifacts/inverse_fit/observation_information.json`
 - `artifacts/inverse_fit/artifacts.json`
 
 What the user learns:
@@ -235,7 +239,7 @@ Expected outputs:
 
 - one ranking over candidate potential families,
 - one best-fit calibration summary,
-- local posterior and sensitivity outputs for the best family,
+- local posterior, sensitivity, and observation-information outputs for the best family,
 - one vertical artifact bundle with family-comparison provenance.
 
 Artifact locations:
@@ -244,6 +248,8 @@ Artifact locations:
 - `artifacts/spectroscopy/family_inference/potential_family_inference.json`
 - `artifacts/spectroscopy/family_inference/candidate_ranking.csv`
 - `artifacts/spectroscopy/family_inference/best_family_calibration.json`
+- `artifacts/spectroscopy/family_inference/best_family_observation_posterior.json`
+- `artifacts/spectroscopy/family_inference/best_family_observation_information.json`
 
 What the user learns:
 
@@ -255,27 +261,57 @@ What the user learns:
 
 Input:
 
-- a separable structure, a reduced coupled-channel structure, or a radial effective coordinate.
+- a separable bounded 2D structure, a reduced coupled-channel structure, or a radial effective coordinate.
 
-Commands:
+Code:
+
+```python
+from spectral_packet_engine import build_separable_2d_report
+
+report = build_separable_2d_report(
+    num_modes_x=4,
+    num_modes_y=4,
+    num_combined_states=6,
+    device="cpu",
+)
+artifacts = report.write_artifacts("artifacts/separable_2d_report")
+```
+
+Expected outputs:
+
+- one structured separable 2D report over a bounded box-plus-box problem,
+- one retained tensor-basis summary with explicit x-major/y-minor indexing,
+- one mode-budget and truncation summary,
+- one Kronecker-sum operator summary,
+- one eigenvalue table compared against the closed-form additive box-plus-box reference.
+
+Artifact locations:
+
+- `artifacts/separable_2d_report/reduced_model_summary.json`
+- `artifacts/separable_2d_report/separable_2d_report.json`
+- `artifacts/separable_2d_report/separable_2d_summary.json`
+- `artifacts/separable_2d_report/eigenvalues.csv`
+- `artifacts/separable_2d_report/mode_budget.json`
+- `artifacts/separable_2d_report/structured_operator.json`
+- `artifacts/separable_2d_report/artifacts.json`
+
+What the user learns:
+
+- structured dimensional lift means separable tensor bases plus Kronecker-sum operators, not arbitrary 2D grids or general 3D infrastructure,
+- mode budgets and truncation cutoffs are first-class outputs rather than hidden heuristics,
+- the artifact-backed report is a narrow beta path centered on one analytically interpretable separable 2D example.
+
+Other reduced-model entry points remain available when the structure is explicit:
 
 ```bash
 spectral-packet-engine analyze-separable-spectrum \
   --family-x harmonic --params-x '{"omega": 8.0}' \
   --family-y harmonic --params-y '{"omega": 6.0}' \
   --device cpu
-```
 
-```bash
 spectral-packet-engine analyze-coupled-surfaces --device cpu
 spectral-packet-engine solve-radial-reduction --family morse --params '{"D_e": 8.0, "alpha": 2.0, "x_eq": 0.7}' --device cpu
 ```
-
-What the user learns:
-
-- the repository supports structured multidimensional extensions without pretending to be a generic 2D/3D solver,
-- each reduction comes with explicit assumptions in the returned summary,
-- artifact bundles preserve those assumptions alongside the numerical outputs.
 
 ## 8. Differentiable Design And Control
 

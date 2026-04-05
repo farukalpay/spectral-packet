@@ -1221,6 +1221,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable the trusted-only execute_python MCP tool. Disabled by default.",
     )
+    # Security limits
+    mcp_parser.add_argument("--max-database-size-mb", type=float, default=256.0, help="Max SQLite database file size in MB.")
+    mcp_parser.add_argument("--max-scratch-databases", type=int, default=20, help="Max number of scratch databases.")
+    mcp_parser.add_argument("--max-script-length", type=int, default=500000, help="Max SQL script length in characters.")
+    mcp_parser.add_argument("--max-script-statements", type=int, default=5000, help="Max statements per SQL script.")
+    mcp_parser.add_argument("--max-query-seconds", type=float, default=30.0, help="Max seconds per SQL query.")
+    mcp_parser.add_argument("--max-pivot-cardinality", type=int, default=500, help="Max distinct values for pivot.")
+    mcp_parser.add_argument("--max-interpolation-steps", type=int, default=100000, help="Max steps for time series interpolation.")
+    mcp_parser.add_argument("--rate-limit-per-minute", type=int, default=120, help="Max tool calls per minute.")
 
     _add_command_parser(
         subparsers,
@@ -2286,6 +2295,14 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                 allowed_hosts=() if args.allowed_host is None else tuple(args.allowed_host),
                 allowed_origins=() if args.allowed_origin is None else tuple(args.allowed_origin),
                 allow_unsafe_python=args.allow_unsafe_python,
+                max_database_size_mb=getattr(args, "max_database_size_mb", 256.0),
+                max_scratch_databases=getattr(args, "max_scratch_databases", 20),
+                max_script_length_chars=getattr(args, "max_script_length", 500000),
+                max_script_statements=getattr(args, "max_script_statements", 5000),
+                max_query_seconds=getattr(args, "max_query_seconds", 30.0),
+                max_pivot_cardinality=getattr(args, "max_pivot_cardinality", 500),
+                max_interpolation_steps=getattr(args, "max_interpolation_steps", 100000),
+                rate_limit_per_minute=getattr(args, "rate_limit_per_minute", 120),
             )
         )
         return 0

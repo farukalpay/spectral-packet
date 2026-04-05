@@ -74,6 +74,7 @@ Differentiable bundles include:
 
 - `differentiable_summary.json`
 - `predicted_eigenvalues.csv` for calibration,
+- `observation_posterior.json` and `observation_information.json` for calibration,
 - `transition_design_spectrum.csv` and `transition_gradient.csv` for transition design,
 - `optimization_history.csv`, `final_density.csv`, and `objective_gradient.csv` for packet control.
 

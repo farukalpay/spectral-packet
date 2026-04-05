@@ -56,6 +56,7 @@ The core mathematical engine lives in:
 Advanced physics modules:
 
 - `src/spectral_packet_engine/eigensolver.py` — arbitrary-potential Schrödinger eigenvalue solver
+- `src/spectral_packet_engine/tensor_product.py` — explicit 2D tensor-product basis and Kronecker-sum operator primitives for structured dimensional lifts
 - `src/spectral_packet_engine/split_operator.py` — split-operator propagation for time-dependent Schrödinger
 - `src/spectral_packet_engine/wigner.py` — Wigner quasi-probability distribution
 - `src/spectral_packet_engine/density_matrix.py` — density matrix formalism and quantum entropies
@@ -71,7 +72,8 @@ Advanced physics modules:
 - `src/spectral_packet_engine/pipelines.py` — auto-parameterized analysis pipelines
 - `src/spectral_packet_engine/load_spectral.py` — spectral load modeling, adaptive throttling, anomaly detection
 - `src/spectral_packet_engine/parametric_potentials.py` — explicit parameterized potential families for inference and design
-- `src/spectral_packet_engine/reduced_models.py` — separable, coupled-channel, radial, and low-rank reduced-model surfaces
+- `src/spectral_packet_engine/uq.py` — shared local posterior, predictive-interval, and identifiability summaries
+- `src/spectral_packet_engine/reduced_models.py` — separable, structured-lift, coupled-channel, radial, and low-rank reduced-model surfaces
 - `src/spectral_packet_engine/differentiable_physics.py` — differentiable calibration and inverse-design workflows
 - `src/spectral_packet_engine/vertical_workflows.py` — domain-specific spectroscopy, transport, control, and tabular verticals
 
@@ -143,6 +145,7 @@ Beta:
 - HTTP API,
 - remote SQL backends,
 - backend-aware JAX surface,
+- separable 2D structured-dimensional-lift report workflow,
 - backend-aware modal-surrogate orchestration.
 
 Experimental:

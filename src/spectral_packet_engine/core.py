@@ -23,11 +23,8 @@ from spectral_packet_engine.inference import (
     EstimationConfig,
     GaussianPacketEstimator,
     ObservationMode,
-    ParameterPosteriorSummary,
     PhysicalInferenceSummary,
-    PosteriorConfig,
     ReconstructionResult,
-    SensitivityMapSummary,
 )
 from spectral_packet_engine.observables import (
     expectation_position,
@@ -60,6 +57,13 @@ from spectral_packet_engine.state import (
     PacketState,
     SpectralState,
     make_truncated_gaussian_packet,
+)
+from spectral_packet_engine.uq import (
+    ObservationInformationSummary,
+    ObservationPosteriorSummary,
+    ParameterPosteriorSummary,
+    PosteriorConfig,
+    SensitivityMapSummary,
 )
 from spectral_packet_engine.workflows import (
     ControlObjective,
@@ -131,6 +135,8 @@ __all__ = [
     "InverseFitSummary",
     "LowRankFactorizationSummary",
     "ObservationMode",
+    "ObservationInformationSummary",
+    "ObservationPosteriorSummary",
     "ObservableGradientSummary",
     "ParameterPosteriorSummary",
     "PacketProjectionSummary",

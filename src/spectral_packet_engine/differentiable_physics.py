@@ -11,13 +11,16 @@ from spectral_packet_engine.basis import InfiniteWellBasis
 from spectral_packet_engine.domain import InfiniteWell1D
 from spectral_packet_engine.dynamics import SpectralPropagator
 from spectral_packet_engine.eigensolver import solve_eigenproblem
-from spectral_packet_engine.inference import (
-    ObservationMode,
+from spectral_packet_engine.uq import (
+    ObservationInformationSummary,
+    ObservationPosteriorSummary,
     ParameterPosteriorSummary,
     PosteriorConfig,
     SensitivityMapSummary,
     flatten_real_view,
     softplus_inverse,
+    summarize_observation_information,
+    summarize_observation_posterior,
     summarize_parameter_posterior,
     summarize_sensitivity_map,
 )
@@ -57,6 +60,8 @@ class PotentialCalibrationSummary:
     parameter_posterior: ParameterPosteriorSummary | None
     sensitivity: SensitivityMapSummary | None
     assumptions: tuple[str, ...]
+    observation_posterior: ObservationPosteriorSummary | None = None
+    observation_information: ObservationInformationSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +291,8 @@ def calibrate_potential_from_spectrum(
 
     parameter_posterior: ParameterPosteriorSummary | None = None
     sensitivity: SensitivityMapSummary | None = None
+    observation_posterior: ObservationPosteriorSummary | None = None
+    observation_information: ObservationInformationSummary | None = None
     resolved_posterior = posterior_config
     if resolved_posterior is not None and resolved_posterior.enabled:
         differentiable_vector = parameter_vector.detach().clone().requires_grad_(True)
@@ -315,6 +322,19 @@ def calibrate_potential_from_spectrum(
             observation_jacobian=observation_jacobian,
             parameter_standard_deviation=parameter_posterior.standard_deviation,
         )
+        if resolved_posterior.compute_observation_posterior:
+            observation_posterior = summarize_observation_posterior(
+                observation=predicted,
+                observation_jacobian=observation_jacobian,
+                parameter_covariance=parameter_posterior.covariance,
+                confidence_level=parameter_posterior.confidence_level,
+            )
+        if resolved_posterior.compute_observation_information:
+            observation_information = summarize_observation_information(
+                observation=predicted,
+                observation_jacobian=observation_jacobian,
+                noise_scale=parameter_posterior.noise_scale,
+            )
 
     return PotentialCalibrationSummary(
         family=family_def.name,
@@ -334,6 +354,8 @@ def calibrate_potential_from_spectrum(
             "The target data are matched by differentiating through the bounded-domain spectral eigensolver.",
             "Posterior uncertainty is a local Laplace approximation around the calibrated parameter vector, not a global Bayesian posterior over model families.",
         ),
+        observation_posterior=observation_posterior,
+        observation_information=observation_information,
     )
 
 

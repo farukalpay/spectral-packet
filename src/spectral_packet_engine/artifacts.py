@@ -574,6 +574,12 @@ def write_inverse_artifacts(
             sensitivity = getattr(physical_inference, "sensitivity", None)
             if sensitivity is not None:
                 write_json(directory / "sensitivity_map.json", sensitivity)
+            observation_posterior = getattr(physical_inference, "observation_posterior", None)
+            if observation_posterior is not None:
+                write_json(directory / "observation_posterior.json", observation_posterior)
+            observation_information = getattr(physical_inference, "observation_information", None)
+            if observation_information is not None:
+                write_json(directory / "observation_information.json", observation_information)
         artifact_metadata = {"workflow": "fit-table", "has_physical_inference": physical_inference is not None}
         if physical_inference is not None:
             parameter_posterior = getattr(physical_inference, "parameter_posterior", None)
@@ -625,6 +631,13 @@ def write_potential_inference_artifacts(
             )
         if best.calibration.sensitivity is not None:
             write_json(directory / "best_family_sensitivity_map.json", best.calibration.sensitivity)
+        if getattr(best.calibration, "observation_posterior", None) is not None:
+            write_json(directory / "best_family_observation_posterior.json", best.calibration.observation_posterior)
+        if getattr(best.calibration, "observation_information", None) is not None:
+            write_json(
+                directory / "best_family_observation_information.json",
+                best.calibration.observation_information,
+            )
         write_artifact_index(
             directory,
             metadata=_artifact_metadata(
@@ -645,10 +658,22 @@ def write_reduced_model_artifacts(
     *,
     metadata: Mapping[str, Any] | None = None,
 ) -> Path:
+    payload = summary.spectrum if hasattr(summary, "spectrum") else summary
     with _artifact_output_session(output_dir) as directory:
         write_json(directory / "reduced_model_summary.json", summary)
+        if hasattr(summary, "overview") and hasattr(summary, "spectrum"):
+            write_json(directory / "separable_2d_report.json", summary)
+            write_json(directory / "separable_2d_summary.json", summary.overview)
         model_type = type(summary).__name__
-        if hasattr(summary, "combined_eigenvalues"):
+        if hasattr(payload, "basis"):
+            write_json(directory / "tensor_basis.json", payload.basis)
+        if hasattr(payload, "mode_budget"):
+            write_json(directory / "mode_budget.json", payload.mode_budget)
+        if hasattr(payload, "truncation"):
+            write_json(directory / "truncation_diagnostics.json", payload.truncation)
+        if hasattr(payload, "operator"):
+            write_json(directory / "structured_operator.json", payload.operator)
+        if hasattr(payload, "combined_eigenvalues"):
             write_rows_csv(
                 directory / "combined_spectrum.csv",
                 ["state_index", "eigenvalue", "state_index_x", "state_index_y"],
@@ -656,15 +681,31 @@ def write_reduced_model_artifacts(
                     [index + 1, value, pair[0], pair[1]]
                     for index, (value, pair) in enumerate(
                         zip(
-                            torch.as_tensor(summary.combined_eigenvalues).detach().cpu().tolist(),
-                            summary.state_index_pairs,
+                            torch.as_tensor(payload.combined_eigenvalues).detach().cpu().tolist(),
+                            payload.state_index_pairs,
                         )
                     )
                 ],
             )
-        if hasattr(summary, "adiabatic_potentials"):
-            grid = torch.as_tensor(summary.grid).detach().cpu().tolist()
-            adiabatic = torch.as_tensor(summary.adiabatic_potentials).detach().cpu()
+        if hasattr(summary, "analytic_reference_eigenvalues") and hasattr(payload, "combined_eigenvalues"):
+            write_rows_csv(
+                directory / "eigenvalues.csv",
+                ["state_index", "eigenvalue", "analytic_reference", "absolute_error", "state_index_x", "state_index_y"],
+                [
+                    [index + 1, eigenvalue, reference, error, pair[0], pair[1]]
+                    for index, (eigenvalue, reference, error, pair) in enumerate(
+                        zip(
+                            torch.as_tensor(payload.combined_eigenvalues).detach().cpu().tolist(),
+                            torch.as_tensor(summary.analytic_reference_eigenvalues).detach().cpu().tolist(),
+                            torch.as_tensor(summary.absolute_error_to_reference).detach().cpu().tolist(),
+                            payload.state_index_pairs,
+                        )
+                    )
+                ],
+            )
+        if hasattr(payload, "adiabatic_potentials"):
+            grid = torch.as_tensor(payload.grid).detach().cpu().tolist()
+            adiabatic = torch.as_tensor(payload.adiabatic_potentials).detach().cpu()
             write_rows_csv(
                 directory / "adiabatic_surfaces.csv",
                 ["position", "surface_1", "surface_2"],
@@ -673,26 +714,36 @@ def write_reduced_model_artifacts(
                     for index, position in enumerate(grid)
                 ],
             )
-        if hasattr(summary, "effective_potential"):
-            grid = torch.as_tensor(summary.radial_grid).detach().cpu().tolist()
-            potential = torch.as_tensor(summary.effective_potential).detach().cpu().tolist()
+        if hasattr(payload, "effective_potential"):
+            grid = torch.as_tensor(payload.radial_grid).detach().cpu().tolist()
+            potential = torch.as_tensor(payload.effective_potential).detach().cpu().tolist()
             write_rows_csv(
                 directory / "effective_potential.csv",
                 ["radius", "effective_potential"],
                 [[radius, value] for radius, value in zip(grid, potential)],
             )
-        if hasattr(summary, "singular_values"):
+        if hasattr(payload, "singular_values"):
             write_rows_csv(
                 directory / "singular_values.csv",
                 ["index", "singular_value"],
                 [
                     [index + 1, value]
-                    for index, value in enumerate(torch.as_tensor(summary.singular_values).detach().cpu().tolist())
+                    for index, value in enumerate(torch.as_tensor(payload.singular_values).detach().cpu().tolist())
                 ],
             )
+        workflow_name = "reduced-model"
+        artifact_metadata = {"workflow": workflow_name, "model_type": model_type}
+        if hasattr(summary, "overview") and hasattr(summary, "spectrum"):
+            workflow_name = "separable-2d-report"
+            artifact_metadata = {
+                "workflow": workflow_name,
+                "model_type": model_type,
+                "example_name": summary.overview.example_name,
+                "retained_combined_state_count": summary.overview.retained_combined_state_count,
+            }
         write_artifact_index(
             directory,
-            metadata=_artifact_metadata({"workflow": "reduced-model", "model_type": model_type}, metadata),
+            metadata=_artifact_metadata(artifact_metadata, metadata),
         )
         return directory
 
@@ -746,6 +797,10 @@ def write_differentiable_artifacts(
                 _write_parameter_posterior_csv(directory / "parameter_posterior.csv", summary.parameter_posterior)
             if getattr(summary, "sensitivity", None) is not None:
                 write_json(directory / "sensitivity_map.json", summary.sensitivity)
+            if getattr(summary, "observation_posterior", None) is not None:
+                write_json(directory / "observation_posterior.json", summary.observation_posterior)
+            if getattr(summary, "observation_information", None) is not None:
+                write_json(directory / "observation_information.json", summary.observation_information)
         elif hasattr(summary, "final_density"):
             workflow_name = "optimize-packet-control"
             write_rows_csv(

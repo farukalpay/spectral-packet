@@ -258,6 +258,17 @@ from spectral_packet_engine.artifacts import (
     write_transport_benchmark_artifacts,
 )
 from spectral_packet_engine.basis import InfiniteWellBasis, eigenenergy, eigenenergies, sine_basis_matrix
+from spectral_packet_engine.tensor_product import (
+    KroneckerSumOperator2D,
+    TensorAxisModeBudget,
+    TensorAxisModes,
+    TensorModeBudget2D,
+    TensorProductBasis2D,
+    TensorProductBasisSummary2D,
+    TensorTruncationDiagnostics2D,
+    make_infinite_well_axis_modes,
+    make_tensor_axis_modes,
+)
 from spectral_packet_engine.database import (
     DatabaseCapabilityReport,
     DatabaseConfig,
@@ -299,11 +310,8 @@ from spectral_packet_engine.inference import (
     EstimationConfig,
     GaussianPacketEstimator,
     ObservationMode,
-    ParameterPosteriorSummary,
     PhysicalInferenceSummary,
-    PosteriorConfig,
     ReconstructionResult,
-    SensitivityMapSummary,
 )
 from spectral_packet_engine.ml import (
     JAXModalRegressor,
@@ -398,6 +406,12 @@ from spectral_packet_engine.release_gate import (
     run_release_gate,
 )
 from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime, resolve_torch_device
+from spectral_packet_engine.reduced_models import (
+    Separable2DReport,
+    Separable2DReportOverview,
+    StructuredOperatorSummary,
+    build_separable_2d_report,
+)
 from spectral_packet_engine.service_runtime import APIStackRuntime, inspect_api_stack
 from spectral_packet_engine.service_status import (
     ServiceStatusReport,
@@ -490,6 +504,13 @@ from spectral_packet_engine.tf_surrogate import (
     configure_tensorflow_runtime,
     inspect_tensorflow_host,
     tensorflow_is_available,
+)
+from spectral_packet_engine.uq import (
+    ObservationInformationSummary,
+    ObservationPosteriorSummary,
+    ParameterPosteriorSummary,
+    PosteriorConfig,
+    SensitivityMapSummary,
 )
 from spectral_packet_engine.workflows import (
     CaptureModeBudget,
@@ -667,6 +688,7 @@ __all__ = list(
             "InfiniteWellDomain",
             "InverseFitSummary",
             "InstallationValidation",
+            "KroneckerSumOperator2D",
             "LowRankFactorizationSummary",
             "JAXModalRegressor",
             "JoinSpec",
@@ -680,7 +702,9 @@ __all__ = list(
             "ModalSurrogateConfig",
             "ModalTrainingSummary",
             "ObservableGradientSummary",
+            "ObservationInformationSummary",
             "ObservationMode",
+            "ObservationPosteriorSummary",
             "CoefficientPosteriorSummary",
             "ParameterPosteriorSummary",
             "PacketControlOptimizationSummary",
@@ -724,6 +748,8 @@ __all__ = list(
             "SimulationRecord",
             "SeparableSpectrumSummary",
             "SensitivityMapSummary",
+            "Separable2DReport",
+            "Separable2DReportOverview",
             "SpectralBatchSummary",
             "SpectralPropagator",
             "SpectralState",
@@ -746,6 +772,8 @@ __all__ = list(
             "TabularSchema",
             "TabularSource",
             "TabularValidationReport",
+            "TensorAxisModeBudget",
+            "TensorAxisModes",
             "TreeBackendReport",
             "TreeBackendResolution",
             "TreeBackendRuntime",
@@ -754,6 +782,10 @@ __all__ = list(
             "TreeModelConfig",
             "TreeSearchKind",
             "TreeTask",
+            "TensorModeBudget2D",
+            "TensorProductBasis2D",
+            "TensorProductBasisSummary2D",
+            "TensorTruncationDiagnostics2D",
             "TreeTrainingSummary",
             "TreeTuningSummary",
             "TorchRuntime",
@@ -767,6 +799,7 @@ __all__ = list(
             "WorkflowInputKind",
             "WorkflowSurfaceName",
             "WorkflowSurfaceBindings",
+            "StructuredOperatorSummary",
             "api_is_available",
             "APIStackRuntime",
             "ArtifactDirectoryReport",
@@ -782,6 +815,7 @@ __all__ = list(
             "benchmark_transport_scan",
             "build_profile_table_report",
             "build_profile_table_report_from_database_query",
+            "build_separable_2d_report",
             "bootstrap_local_database",
             "build_engine",
             "calibrate_potential_from_spectrum",
@@ -871,7 +905,9 @@ __all__ = list(
             "materialize_database_query",
             "materialize_profile_table_from_database_query",
             "materialize_database_query_to_table",
+            "make_infinite_well_axis_modes",
             "mcp_is_available",
+            "make_tensor_axis_modes",
             "mode_counts_for_mass",
             "modal_energy",
             "modal_tail",

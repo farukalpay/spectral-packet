@@ -1,15 +1,92 @@
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import logging
 from pathlib import Path
 import sqlite3
+import time
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
 from spectral_packet_engine.tabular import TabularDataset, TabularSource
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Security guards — these are library-level protections so every host gets
+# the same safety regardless of how the server is deployed.
+# ---------------------------------------------------------------------------
+
+class QueryTimeoutError(Exception):
+    """Raised when a SQL query exceeds the configured time limit."""
+
+
+class ResourceLimitError(Exception):
+    """Raised when an operation exceeds a configured resource limit."""
+
+
+def _make_progress_handler(timeout_seconds: float):
+    """Return a SQLite progress handler that aborts after *timeout_seconds*.
+
+    The handler is called every ~1000 VM instructions.  When it returns
+    a non-zero value SQLite raises ``OperationalError``.
+    """
+    deadline = time.monotonic() + timeout_seconds
+
+    def handler() -> int:
+        if time.monotonic() > deadline:
+            return 1  # non-zero → abort
+        return 0
+
+    return handler
+
+
+def validate_script_limits(
+    script: str,
+    *,
+    max_length_chars: int = 500_000,
+    max_statements: int = 5_000,
+) -> int:
+    """Validate a SQL script against size and statement-count limits.
+
+    Returns the statement count on success, raises *ResourceLimitError*
+    on violation.  This runs **before** any SQL is executed.
+    """
+    if len(script) > max_length_chars:
+        raise ResourceLimitError(
+            f"SQL script is {len(script):,} characters, exceeding the "
+            f"{max_length_chars:,}-character limit. Split your workload "
+            f"into smaller scripts."
+        )
+    count = _count_sql_statements(script)
+    if count > max_statements:
+        raise ResourceLimitError(
+            f"SQL script contains {count:,} statements, exceeding the "
+            f"{max_statements:,}-statement limit. Split your workload "
+            f"into smaller scripts."
+        )
+    return count
+
+
+def check_database_file_size(
+    path: Path | str | None,
+    max_size_mb: float = 256.0,
+) -> None:
+    """Raise *ResourceLimitError* if a database file exceeds *max_size_mb*."""
+    if path is None:
+        return
+    p = Path(path)
+    if not p.exists():
+        return
+    size_mb = p.stat().st_size / (1024 * 1024)
+    if size_mb > max_size_mb:
+        raise ResourceLimitError(
+            f"Database file is {size_mb:.1f} MB, exceeding the "
+            f"{max_size_mb:.0f} MB limit. Delete unused tables or "
+            f"create a new database."
+        )
 
 
 _SQLITE_URL_PREFIX = "sqlite:///"
@@ -102,6 +179,115 @@ def _literal_sql(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _rewrite_values_to_union(sql: str) -> str:
+    """Rewrite standalone ``VALUES (...), (...)`` queries to ``SELECT ... UNION ALL SELECT ...``.
+
+    SQLite does not support ``VALUES`` as a standalone query or inside
+    ``CREATE TABLE AS``.  This function detects the pattern and rewrites
+    it transparently so callers can use standard SQL ``VALUES`` syntax.
+
+    Handles:
+      - ``VALUES (1,'a'), (2,'b')``
+      - ``VALUES (1,'a'), (2,'b') AS t(id, name)``  (alias stripped)
+    """
+    stripped = sql.strip()
+    # Quick check: does it look like a VALUES statement?
+    upper = stripped.upper()
+    if not upper.startswith("VALUES") and not upper.startswith("(VALUES"):
+        return sql
+
+    # Remove leading "VALUES" keyword (case-insensitive)
+    body = stripped
+    if upper.startswith("VALUES"):
+        body = stripped[6:].strip()
+
+    # Strip trailing alias: "AS t(col1, col2, ...)"
+    alias_columns: list[str] | None = None
+    import re
+    alias_match = re.search(r'\)\s+AS\s+\w+\s*\(([^)]+)\)\s*$', body, re.IGNORECASE)
+    if alias_match:
+        alias_columns = [c.strip().strip('"').strip("'") for c in alias_match.group(1).split(",")]
+        body = body[:alias_match.start() + 1].strip()  # keep the last ')' of the last row
+
+    # Parse row tuples: "(val, val, ...)" separated by commas
+    # We need to handle nested parens and quoted strings
+    rows: list[str] = []
+    depth = 0
+    current: list[str] = []
+    in_single_quote = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "'" and not (i > 0 and body[i - 1] == "'"):
+            in_single_quote = not in_single_quote
+            current.append(ch)
+        elif in_single_quote:
+            current.append(ch)
+        elif ch == "(":
+            if depth == 0:
+                current = []
+            else:
+                current.append(ch)
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                rows.append("".join(current).strip())
+            else:
+                current.append(ch)
+        elif ch == "," and depth == 0:
+            pass  # skip comma between row tuples
+        else:
+            current.append(ch)
+        i += 1
+
+    if not rows:
+        return sql  # couldn't parse, return original
+
+    # Build UNION ALL SELECT chain
+    selects: list[str] = []
+    for row_values in rows:
+        # row_values is like "1, 'a', 55.0"
+        if alias_columns and len(alias_columns) > 0:
+            # Split values carefully
+            vals = _split_csv_values(row_values)
+            if len(vals) == len(alias_columns):
+                col_exprs = [f"{v.strip()} AS {_quote_identifier(c)}" for v, c in zip(vals, alias_columns)]
+                selects.append(f"SELECT {', '.join(col_exprs)}")
+            else:
+                selects.append(f"SELECT {row_values}")
+        else:
+            selects.append(f"SELECT {row_values}")
+
+    return " UNION ALL ".join(selects)
+
+
+def _split_csv_values(s: str) -> list[str]:
+    """Split a comma-separated value list respecting quoted strings."""
+    values: list[str] = []
+    current: list[str] = []
+    in_quote = False
+    depth = 0
+    for ch in s:
+        if ch == "'" and depth == 0:
+            in_quote = not in_quote
+            current.append(ch)
+        elif ch == "(" and not in_quote:
+            depth += 1
+            current.append(ch)
+        elif ch == ")" and not in_quote:
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and not in_quote and depth == 0:
+            values.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        values.append("".join(current).strip())
+    return values
 
 
 def _count_sql_statements(script: str) -> int:
@@ -546,19 +732,35 @@ class DatabaseConnection:
         query: str,
         *,
         parameters: Mapping[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> QueryResult:
         self._ensure_connected()
+        # Auto-rewrite VALUES syntax for SQLite compatibility
+        if self.config.is_sqlite:
+            query = _rewrite_values_to_union(query)
         bound_parameters = {} if parameters is None else dict(parameters)
         if self.config.is_sqlite:
             self._sqlite_connection.execute("PRAGMA query_only = ON")
             self._sqlite_connection.set_authorizer(_sqlite_readonly_authorizer)
+            if timeout_seconds is not None and timeout_seconds > 0:
+                self._sqlite_connection.set_progress_handler(
+                    _make_progress_handler(timeout_seconds), 1000
+                )
             try:
                 cursor = self._sqlite_connection.execute(query, bound_parameters)
                 rows = cursor.fetchall()
                 if cursor.description is None:
                     raise ValueError("query did not return a result set")
                 column_names = [item[0] for item in cursor.description]
+            except sqlite3.OperationalError as exc:
+                if "interrupted" in str(exc).lower():
+                    raise QueryTimeoutError(
+                        f"Query exceeded {timeout_seconds:.0f}s time limit. "
+                        f"Simplify your query or add LIMIT."
+                    ) from exc
+                raise
             finally:
+                self._sqlite_connection.set_progress_handler(None, 0)
                 self._sqlite_connection.set_authorizer(None)
                 try:
                     self._sqlite_connection.execute("PRAGMA query_only = OFF")
@@ -591,12 +793,26 @@ class DatabaseConnection:
         statement: str,
         *,
         parameters: Mapping[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> StatementExecutionResult:
         self._ensure_connected()
         bound_parameters = {} if parameters is None else dict(parameters)
         if self.config.is_sqlite:
-            cursor = self._sqlite_connection.execute(statement, bound_parameters)
-            self._sqlite_connection.commit()
+            if timeout_seconds is not None and timeout_seconds > 0:
+                self._sqlite_connection.set_progress_handler(
+                    _make_progress_handler(timeout_seconds), 1000
+                )
+            try:
+                cursor = self._sqlite_connection.execute(statement, bound_parameters)
+                self._sqlite_connection.commit()
+            except sqlite3.OperationalError as exc:
+                if "interrupted" in str(exc).lower():
+                    raise QueryTimeoutError(
+                        f"Statement exceeded {timeout_seconds:.0f}s time limit."
+                    ) from exc
+                raise
+            finally:
+                self._sqlite_connection.set_progress_handler(None, 0)
             row_count = int(cursor.rowcount if cursor.rowcount is not None else 0)
             return StatementExecutionResult(
                 statement=statement,
@@ -613,18 +829,43 @@ class DatabaseConnection:
                 row_count=row_count,
             )
 
-    def execute_script(self, script: str) -> ScriptExecutionResult:
+    def execute_script(
+        self,
+        script: str,
+        *,
+        max_length_chars: int = 500_000,
+        max_statements: int = 5_000,
+        timeout_seconds: float | None = None,
+    ) -> ScriptExecutionResult:
         self._ensure_connected()
         if not self.config.is_sqlite:
             raise NotImplementedError(
                 "Multi-statement SQL scripts are only supported for SQLite connections. "
                 "Use execute() for a single statement on remote SQL backends."
             )
-        self._sqlite_connection.executescript(script)
-        self._sqlite_connection.commit()
+        statement_count = validate_script_limits(
+            script,
+            max_length_chars=max_length_chars,
+            max_statements=max_statements,
+        )
+        if timeout_seconds is not None and timeout_seconds > 0:
+            self._sqlite_connection.set_progress_handler(
+                _make_progress_handler(timeout_seconds), 1000
+            )
+        try:
+            self._sqlite_connection.executescript(script)
+            self._sqlite_connection.commit()
+        except sqlite3.OperationalError as exc:
+            if "interrupted" in str(exc).lower():
+                raise QueryTimeoutError(
+                    f"Script exceeded {timeout_seconds:.0f}s time limit."
+                ) from exc
+            raise
+        finally:
+            self._sqlite_connection.set_progress_handler(None, 0)
         return ScriptExecutionResult(
             script=script,
-            statement_count=_count_sql_statements(script),
+            statement_count=statement_count,
         )
 
     def create_table(
@@ -897,6 +1138,9 @@ class DatabaseConnection:
         coerce_types: bool = True,
     ) -> TableSchemaSummary:
         self._ensure_connected()
+        # Auto-rewrite VALUES syntax for SQLite compatibility
+        if self.config.is_sqlite:
+            query = _rewrite_values_to_union(query)
         normalized_target = _quote_compound_identifier(target_table)
         bound_parameters = {} if parameters is None else dict(parameters)
         if self.config.is_sqlite:
@@ -944,10 +1188,13 @@ class DatabaseConnection:
         value_column: str,
         *,
         aggregate: str = "MAX",
+        max_cardinality: int = 500,
     ) -> str:
         """Generate a SQL pivot query for the given table.
 
         Returns the raw SQL string that can be executed or materialized.
+        Raises *ResourceLimitError* if the pivot column has more than
+        *max_cardinality* distinct values.
         """
         self._ensure_connected()
         normalized_name = _quote_compound_identifier(table_name)
@@ -963,6 +1210,13 @@ class DatabaseConnection:
             with self._engine.connect() as connection:
                 result = connection.execute(sqlalchemy.text(cursor_sql))
                 distinct_values = [row[0] for row in result.fetchall()]
+
+        if len(distinct_values) > max_cardinality:
+            raise ResourceLimitError(
+                f"Pivot column {pivot_column!r} has {len(distinct_values):,} distinct values, "
+                f"exceeding the {max_cardinality:,} limit. Filter your data or group "
+                f"before pivoting."
+            )
 
         agg = aggregate.upper()
         case_clauses = []
@@ -982,6 +1236,8 @@ class DatabaseConnection:
         table_name: str,
         id_columns: Sequence[str],
         value_columns: Sequence[str] | None = None,
+        *,
+        max_columns: int = 200,
     ) -> str:
         """Generate a SQL unpivot (melt) query for the given table.
 
@@ -994,6 +1250,11 @@ class DatabaseConnection:
             value_columns = [c.name for c in schema.columns if c.name not in id_set]
         if not value_columns:
             raise ValueError("no value columns to unpivot")
+        if len(value_columns) > max_columns:
+            raise ResourceLimitError(
+                f"Unpivot has {len(value_columns)} value columns, exceeding the "
+                f"{max_columns} limit. Select fewer columns."
+            )
 
         normalized_name = _quote_compound_identifier(table_name)
         id_select = ", ".join(_quote_identifier(c) for c in id_columns)
@@ -1014,14 +1275,32 @@ class DatabaseConnection:
         *,
         step: float = 1.0,
         method: str = "linear",
+        max_steps: int = 100_000,
     ) -> str:
         """Generate SQL for linear interpolation over time gaps.
 
         Returns a query that fills missing time steps with linearly
         interpolated values using window functions.
         """
+        if step <= 0:
+            raise ValueError("interpolation step must be positive")
+        # Pre-flight: estimate step count to prevent CTE bombs
+        self._ensure_connected()
         normalized_name = _quote_compound_identifier(table_name)
         tc = _quote_identifier(time_column)
+        if self.config.is_sqlite:
+            bounds_row = self._sqlite_connection.execute(
+                f"SELECT MIN(CAST({tc} AS REAL)) AS t_min, "
+                f"MAX(CAST({tc} AS REAL)) AS t_max FROM {normalized_name}"
+            ).fetchone()
+            if bounds_row and bounds_row["t_min"] is not None:
+                estimated_steps = int((bounds_row["t_max"] - bounds_row["t_min"]) / step) + 1
+                if estimated_steps > max_steps:
+                    raise ResourceLimitError(
+                        f"Interpolation would generate ~{estimated_steps:,} steps, "
+                        f"exceeding the {max_steps:,} limit. Use a larger step size "
+                        f"or filter your time range."
+                    )
 
         series_cte = (
             f"WITH bounds AS ("
@@ -1151,10 +1430,14 @@ __all__ = [
     "DatabaseConfig",
     "DatabaseConnection",
     "QueryResult",
+    "QueryTimeoutError",
+    "ResourceLimitError",
     "ScriptExecutionResult",
     "StatementExecutionResult",
     "TableColumnSpec",
     "TableSchemaSummary",
+    "check_database_file_size",
     "inspect_database_capabilities",
     "sqlalchemy_is_available",
+    "validate_script_limits",
 ]

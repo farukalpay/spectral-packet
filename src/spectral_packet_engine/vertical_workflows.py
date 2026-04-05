@@ -17,13 +17,13 @@ from spectral_packet_engine.differentiable_physics import (
     calibrate_potential_from_spectrum,
     optimize_packet_control,
 )
-from spectral_packet_engine.inference import PosteriorConfig
 from spectral_packet_engine.parametric_potentials import (
     available_potential_families,
     default_parameter_mapping,
 )
 from spectral_packet_engine.pipelines import TunnelingExperimentReport, analyze_tunneling
 from spectral_packet_engine.runtime import inspect_torch_runtime
+from spectral_packet_engine.uq import PosteriorConfig
 
 Tensor = torch.Tensor
 

@@ -23,6 +23,8 @@ def test_grouped_public_surfaces_are_exposed() -> None:
     assert spe.write_feature_table_artifacts is not None
     assert spe.train_tree_model is not None
     assert spe.tune_tree_model is not None
+    assert spe.build_separable_2d_report is not None
+    assert spe.make_infinite_well_axis_modes is not None
     assert spe.write_profile_table_report_artifacts is not None
     assert spe.run_release_gate is not None
 
@@ -85,4 +87,9 @@ def test_top_level_all_is_deduplicated() -> None:
     assert "WorkflowGoal" in spe.__all__
     assert "DatabaseExecutionSummary" in spe.__all__
     assert "PotentialFamilyInferenceSummary" in spe.__all__
+    assert "ObservationPosteriorSummary" in spe.__all__
+    assert "ObservationInformationSummary" in spe.__all__
+    assert "Separable2DReport" in spe.__all__
+    assert "TensorProductBasis2D" in spe.__all__
+    assert "build_separable_2d_report" in spe.__all__
     assert "run_transport_resonance_workflow" in spe.__all__

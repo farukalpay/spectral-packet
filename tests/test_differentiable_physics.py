@@ -36,6 +36,10 @@ def test_calibrate_potential_from_spectrum_recovers_harmonic_family_parameter() 
     assert summary.final_loss < 5e-2
     assert summary.parameter_posterior is not None
     assert summary.sensitivity is not None
+    assert summary.observation_posterior is not None
+    assert summary.observation_posterior.observation_shape == (3,)
+    assert summary.observation_information is not None
+    assert summary.observation_information.effective_observation_count > 0.0
 
 
 def test_design_potential_for_target_transition_hits_requested_value() -> None:
