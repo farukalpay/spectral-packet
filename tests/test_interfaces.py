@@ -33,6 +33,8 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert product.json()["product_name"] == "Spectral Packet Engine"
     assert product.json()["hero_workflow"]["workflow_id"] == "profile-table-report"
     assert len(product.json()["killer_workflows"]) == 3
+    assert any(workflow["workflow_id"] == "infer-potential-spectrum" for workflow in product.json()["workflows"])
+    assert any(workflow["workflow_id"] == "profile-inference-workflow" for workflow in product.json()["workflows"])
 
     workflow_guide = client.get("/workflow/guide", params={"input_kind": "profile-table-sql", "goal": "feature-model"})
     assert workflow_guide.status_code == 200
@@ -419,9 +421,48 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "report_database_profile_query" in by_name
     assert "fit_packet_to_database_profile_query" in by_name
     assert "train_modal_surrogate_from_sql" in by_name
+    assert "infer_potential_spectrum" in by_name
+    assert "analyze_separable_spectrum" in by_name
+    assert "analyze_coupled_surfaces" in by_name
+    assert "solve_radial_reduction" in by_name
+    assert "design_transition" in by_name
+    assert "optimize_packet_control" in by_name
+    assert "transport_workflow" in by_name
+    assert "profile_inference_workflow" in by_name
     assert by_name["inspect_environment"].description
     assert by_name["query_database"].description
     assert "read-only" in by_name["query_database"].description
+
+
+def test_mcp_resources_and_prompts_expose_new_inverse_physics_capabilities_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _inspect():
+        server = create_mcp_server()
+        resources = await server.list_resources()
+        prompts = await server.list_prompts()
+        inverse_resource = await server.read_resource("spectral://capabilities/inverse-uq")
+        prompt = await server.get_prompt(
+            "select_vertical_workflow",
+            {"domain_question": "transport resonance"},
+        )
+        return resources, prompts, inverse_resource, prompt
+
+    resources, prompts, inverse_resource, prompt = asyncio.run(_inspect())
+    resource_uris = {str(item.uri) for item in resources}
+    prompt_names = {item.name for item in prompts}
+
+    assert "spectral://capabilities/inverse-uq" in resource_uris
+    assert "spectral://capabilities/reduced-models" in resource_uris
+    assert "spectral://capabilities/differentiable-physics" in resource_uris
+    assert "spectral://capabilities/vertical-workflows" in resource_uris
+    assert "select_inverse_physics_workflow" in prompt_names
+    assert "select_reduced_model_strategy" in prompt_names
+    assert "select_vertical_workflow" in prompt_names
+    assert "infer_potential_spectrum" in str(inverse_resource)
+    assert "transport_workflow" in str(prompt)
 
 
 def test_mcp_product_tool_reports_shared_identity_when_available() -> None:

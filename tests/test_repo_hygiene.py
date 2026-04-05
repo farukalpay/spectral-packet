@@ -22,8 +22,10 @@ def test_examples_surface_is_curated_for_public_use() -> None:
     assert public_scripts == [
         "api_workflow.py",
         "core_engine_workflow.py",
+        "inverse_physics_workflow.py",
         "modal_surrogate_workflow.py",
         "profile_table_workflow.py",
+        "reduced_model_workflow.py",
         "tunneling_experiment.py",
     ]
     assert (examples_dir / "README.md").exists()

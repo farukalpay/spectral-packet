@@ -74,11 +74,31 @@ For the shared hosted deployment, the public MCP endpoint is [https://lightcap.a
 - service status inspection
 - file-format and tabular capability inspection
 - profile-table report, analysis, compression, comparison, and inverse fitting
+- potential-family inference and uncertainty-aware spectral inverse workflows
+- reduced models: separable spectra, coupled surfaces, and radial reductions
+- differentiable design and packet-control workflows
+- vertical workflows for spectroscopy, transport, and scientific tabular inference
 - spectral feature export plus tree-model training and tuning
 - bounded-domain packet simulation and modal projection
 - SQLite bootstrap, query, materialization, and SQL-backed report/analyze/compress/fit workflows
 - backend-aware modal-surrogate training and evaluation
 - spectral load modeling, anomaly detection, adaptive throttling, and capacity estimation
+
+### Capability Resources And Prompt Templates
+
+The MCP server now publishes machine-readable discovery surfaces in addition to tools:
+
+- resources:
+  - `spectral://capabilities/inverse-uq`
+  - `spectral://capabilities/reduced-models`
+  - `spectral://capabilities/differentiable-physics`
+  - `spectral://capabilities/vertical-workflows`
+- prompts:
+  - `select_inverse_physics_workflow`
+  - `select_reduced_model_strategy`
+  - `select_vertical_workflow`
+
+These exist so an MCP client can decide which spectral capability to call without inventing its own routing policy.
 
 ### Analysis Pipelines (auto-parameterized, one-call)
 
@@ -93,6 +113,19 @@ These are the highest-value MCP tools for data engineers and AI agents who don't
 | `compare_quantum_states_pipeline` | Two packet params | Fidelity, trace distance, energy/momentum differences |
 
 An AI client can say "analyze this profile CSV" and receive a complete structured report without knowing any internal function names or parameter conventions.
+
+### Inverse, Reduced, And Differentiable Tool Families
+
+| Tool | Category | What It Returns |
+| --- | --- | --- |
+| `infer_potential_spectrum` | Inverse / UQ | family ranking, best-fit parameters, local posterior and sensitivity summaries |
+| `analyze_separable_spectrum` | Reduced model | tensor-product spectrum with explicit separability assumptions |
+| `analyze_coupled_surfaces` | Reduced model | diabatic/adiabatic surfaces and derivative couplings for a reduced avoided crossing |
+| `solve_radial_reduction` | Reduced model | bounded radial effective-potential spectrum with centrifugal term |
+| `design_transition` | Differentiable physics | optimized family parameters plus transition gradient |
+| `optimize_packet_control` | Differentiable physics | optimized packet preparation parameters, final density, and observable gradient |
+| `transport_workflow` | Vertical workflow | one transport bundle spanning scattering, WKB, propagation, and Wigner diagnostics |
+| `profile_inference_workflow` | Vertical workflow | one nested bundle spanning report, inverse fit, and feature export |
 
 ### Advanced Physics Tools (60+ tools total)
 

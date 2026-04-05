@@ -19,6 +19,7 @@ from spectral_packet_engine.artifacts import (
     write_json,
     write_compression_artifacts,
     write_compression_sweep_artifacts,
+    write_differentiable_artifacts,
     write_feature_table_artifacts,
     write_forward_artifacts,
     write_inverse_artifacts,
@@ -26,7 +27,9 @@ from spectral_packet_engine.artifacts import (
     write_modal_training_artifacts,
     write_mcp_probe_artifacts,
     write_packet_sweep_artifacts,
+    write_potential_inference_artifacts,
     write_profile_comparison_artifacts,
+    write_reduced_model_artifacts,
     write_spectral_analysis_artifacts,
     write_tree_training_artifacts,
     write_tree_tuning_artifacts,
@@ -34,6 +37,7 @@ from spectral_packet_engine.artifacts import (
     write_tensorflow_evaluation_artifacts,
     write_tensorflow_training_artifacts,
     write_transport_benchmark_artifacts,
+    write_vertical_workflow_artifacts,
 )
 from spectral_packet_engine.mcp_runtime import (
     MCPServerConfig,
@@ -63,8 +67,10 @@ from spectral_packet_engine.tabular import load_tabular_dataset, supported_tabul
 from spectral_packet_engine.table_io import load_profile_table, save_profile_table_csv, supported_profile_table_formats
 from spectral_packet_engine.tf_surrogate import TensorFlowRegressorConfig
 from spectral_packet_engine.workflows import (
+    analyze_coupled_channel_surfaces,
     analyze_profile_table_spectra,
     analyze_profile_table_from_database_query,
+    analyze_separable_tensor_product_spectrum,
     benchmark_transport_scan,
     build_profile_table_report_from_database_query,
     bootstrap_local_database,
@@ -74,6 +80,8 @@ from spectral_packet_engine.workflows import (
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    describe_potential_families,
+    design_potential_for_target_transition,
     execute_database_script,
     execute_database_statement,
     export_feature_table_from_database_query,
@@ -83,6 +91,8 @@ from spectral_packet_engine.workflows import (
     evaluate_tensorflow_surrogate_on_profile_table,
     fit_gaussian_packet_to_profile_table,
     fit_gaussian_packet_to_profile_table_from_database_query,
+    GradientOptimizationConfig,
+    infer_potential_family_from_spectrum,
     inspect_database,
     inspect_environment,
     inspect_ml_backend_support,
@@ -90,9 +100,15 @@ from spectral_packet_engine.workflows import (
     load_profile_table_report,
     materialize_database_query,
     materialize_database_query_to_table,
+    optimize_packet_control,
     simulate_packet_sweep,
     project_gaussian_packet,
+    run_control_workflow,
+    run_profile_inference_workflow,
+    run_spectroscopy_workflow,
+    run_transport_resonance_workflow,
     simulate_gaussian_packet,
+    solve_radial_reduction,
     summarize_database_query_result,
     summarize_profile_table,
     summarize_tabular_dataset,
@@ -386,6 +402,147 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def supported_tabular_formats_tool() -> dict[str, bool]:
         return supported_tabular_formats()
 
+    @server.resource(
+        "spectral://capabilities/inverse-uq",
+        name="inverse_uq_capabilities",
+        description="Structured overview of uncertainty-aware inverse inference capabilities exposed by the spectral engine.",
+        mime_type="application/json",
+    )
+    def inverse_uq_resource() -> dict[str, Any]:
+        return {
+            "category": "inverse-uq",
+            "positioning": "Local uncertainty-aware physical inference over explicit bounded-domain model families.",
+            "tools": [
+                "infer_potential_spectrum",
+                "fit_packet_to_profile_table",
+                "fit_packet_to_database_profile_query",
+            ],
+            "artifacts": [
+                "uncertainty_summary.json",
+                "parameter_posterior.csv",
+                "modal_posterior.csv",
+                "sensitivity_map.json",
+                "candidate_ranking.csv",
+            ],
+            "potential_families": describe_potential_families(),
+            "limitations": [
+                "Posterior summaries are local Laplace-style approximations, not global Bayesian posteriors over unrestricted model spaces.",
+                "Potential-family comparison uses explicit parametric families and structured evidence weights rather than black-box model search.",
+            ],
+        }
+
+    @server.resource(
+        "spectral://capabilities/reduced-models",
+        name="reduced_model_capabilities",
+        description="Structured overview of controlled reduced-model workflows beyond plain 1D.",
+        mime_type="application/json",
+    )
+    def reduced_models_resource() -> dict[str, Any]:
+        return {
+            "category": "reduced-models",
+            "tools": [
+                "analyze_separable_spectrum",
+                "analyze_coupled_surfaces",
+                "solve_radial_reduction",
+            ],
+            "scope": [
+                "Separable tensor-product spectra from independent 1D axes",
+                "Reduced two-channel adiabatic surface analysis",
+                "Radial effective-coordinate reductions with centrifugal terms",
+            ],
+            "limitations": [
+                "No claim is made for arbitrary full 2D/3D solvers.",
+                "Assumptions are surfaced explicitly in each workflow summary and artifact bundle.",
+            ],
+        }
+
+    @server.resource(
+        "spectral://capabilities/differentiable-physics",
+        name="differentiable_physics_capabilities",
+        description="Structured overview of differentiable calibration and inverse-design workflows.",
+        mime_type="application/json",
+    )
+    def differentiable_physics_resource() -> dict[str, Any]:
+        return {
+            "category": "differentiable-physics",
+            "tools": [
+                "design_transition",
+                "optimize_packet_control",
+            ],
+            "objectives": [
+                "potential -> spectrum calibration",
+                "potential -> target transition inverse design",
+                "state preparation -> target observable steering",
+            ],
+            "limitations": [
+                "Gradients are local to the explicit parameterization and can become delicate near eigenvalue crossings or non-smooth parameter maps.",
+            ],
+        }
+
+    @server.resource(
+        "spectral://capabilities/vertical-workflows",
+        name="vertical_workflow_capabilities",
+        description="Structured overview of domain-specific vertical workflows built on the same spectral core.",
+        mime_type="application/json",
+    )
+    def vertical_workflows_resource() -> dict[str, Any]:
+        return {
+            "category": "vertical-workflows",
+            "tools": [
+                "infer_potential_spectrum",
+                "transport_workflow",
+                "optimize_packet_control",
+                "profile_inference_workflow",
+            ],
+            "verticals": {
+                "spectroscopy": "Potential-family inference from low-lying spectra with uncertainty-aware best-fit summaries.",
+                "transport": "Barrier/resonance workflow chaining transfer-matrix scattering, WKB comparison, propagation, and Wigner diagnostics.",
+                "control": "Differentiable packet steering toward target observables by optimizing state preparation parameters.",
+                "scientific-tabular": "Report-first profile-table workflow that couples spectral compression, inverse fitting, and feature export.",
+            },
+        }
+
+    @server.prompt(
+        name="select_inverse_physics_workflow",
+        description="Explain which inverse/UQ spectral workflow to call for a given observation type and desired output.",
+    )
+    def inverse_physics_prompt(
+        observation_type: str = "spectrum",
+        desired_output: str = "family inference with uncertainty",
+    ) -> str:
+        return (
+            "Use the spectral inverse-physics tools, not a generic regression tool.\n"
+            f"Observation type: {observation_type}\n"
+            f"Desired output: {desired_output}\n"
+            "If the observation is a low-lying spectrum, call infer_potential_spectrum.\n"
+            "If the observation is a file-backed or SQL-backed density profile table, call profile_table_report first and only then fit_packet_to_profile_table or fit_packet_to_database_profile_query.\n"
+            "Prefer artifact-backed runs when the client needs inspectable posterior, sensitivity, or provenance outputs."
+        )
+
+    @server.prompt(
+        name="select_reduced_model_strategy",
+        description="Explain which reduced-model tool to use based on the available physical structure.",
+    )
+    def reduced_model_prompt(problem_structure: str = "separable 2D Hamiltonian") -> str:
+        return (
+            "Choose the reduced model that matches the explicit structure in the physics problem.\n"
+            f"Problem structure: {problem_structure}\n"
+            "Use analyze_separable_spectrum for tensor-product separability, analyze_coupled_surfaces for reduced multi-surface avoided crossings, and solve_radial_reduction for effective radial coordinates with angular momentum.\n"
+            "Do not describe these workflows as arbitrary multidimensional solvers."
+        )
+
+    @server.prompt(
+        name="select_vertical_workflow",
+        description="Explain which domain-specific vertical workflow best matches the user’s scientific question.",
+    )
+    def vertical_workflow_prompt(domain_question: str = "spectroscopy") -> str:
+        return (
+            "Map the user's question onto one explicit spectral vertical workflow.\n"
+            f"Question domain: {domain_question}\n"
+            "Use infer_potential_spectrum for spectroscopy or family inference, transport_workflow for barrier and resonance questions, optimize_packet_control for packet steering objectives, and profile_inference_workflow for report-first scientific tabular jobs.\n"
+            "Keep the explanation tied to the spectral engine rather than generic ML language."
+        )
+
     @_tool(server, runtime, "simulate_packet", "Simulate a Gaussian wavepacket in the infinite-well basis: project onto modes, propagate in time, and return grid-space snapshots with energy conservation diagnostics.", bounded=True)
     def simulate_packet_tool(
         center: float = 0.30,
@@ -584,6 +741,278 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_inverse_artifacts(output_dir, summary)
         return to_serializable(summary)
 
+    @_tool(server, runtime, "describe_potential_families", "List the explicit bounded-domain potential families available for inverse inference and differentiable design.")
+    def describe_potential_families_tool() -> dict[str, Any]:
+        return {"families": describe_potential_families()}
+
+    @_tool(server, runtime, "infer_potential_spectrum", "Infer which explicit potential family best explains an observed low-lying spectrum, returning family ranking, best-fit parameters, and local uncertainty summaries.", bounded=True)
+    def infer_potential_spectrum_tool(
+        target_eigenvalues: list[float],
+        families: list[str] | None = None,
+        initial_guesses: dict[str, Any] | None = None,
+        domain_length: float = 1.0,
+        left: float = 0.0,
+        mass: float = 1.0,
+        hbar: float = 1.0,
+        num_points: int = 128,
+        steps: int = 200,
+        learning_rate: float = 0.05,
+        device: str = "auto",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_initial_guesses = None
+        if initial_guesses is not None:
+            normalized_initial_guesses = {
+                str(family): {str(name): float(value) for name, value in parameters.items()}
+                for family, parameters in initial_guesses.items()
+            }
+        summary = infer_potential_family_from_spectrum(
+            target_eigenvalues=target_eigenvalues,
+            families=families,
+            initial_guesses=normalized_initial_guesses,
+            domain_length=domain_length,
+            left=left,
+            mass=mass,
+            hbar=hbar,
+            num_points=num_points,
+            optimization_config=GradientOptimizationConfig(steps=steps, learning_rate=learning_rate),
+            device=device,
+        )
+        if output_dir is not None:
+            write_potential_inference_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "analyze_separable_spectrum", "Analyze a restricted separable tensor-product spectrum from two independent 1D bounded-domain potential families.", bounded=True)
+    def analyze_separable_spectrum_tool(
+        family_x: str,
+        parameters_x: dict[str, float],
+        family_y: str,
+        parameters_y: dict[str, float],
+        domain_length_x: float = 1.0,
+        domain_length_y: float = 1.0,
+        num_points_x: int = 96,
+        num_points_y: int = 96,
+        num_states_x: int = 6,
+        num_states_y: int = 6,
+        num_combined_states: int = 12,
+        low_rank_rank: int = 1,
+        device: str = "auto",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        summary = analyze_separable_tensor_product_spectrum(
+            family_x=family_x,
+            parameters_x={str(name): float(value) for name, value in parameters_x.items()},
+            family_y=family_y,
+            parameters_y={str(name): float(value) for name, value in parameters_y.items()},
+            domain_length_x=domain_length_x,
+            domain_length_y=domain_length_y,
+            num_points_x=num_points_x,
+            num_points_y=num_points_y,
+            num_states_x=num_states_x,
+            num_states_y=num_states_y,
+            num_combined_states=num_combined_states,
+            low_rank_rank=low_rank_rank,
+            device=device,
+        )
+        if output_dir is not None:
+            write_reduced_model_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "analyze_coupled_surfaces", "Analyze a reduced two-channel avoided crossing, including adiabatic surfaces and derivative couplings.", bounded=True)
+    def analyze_coupled_surfaces_tool(
+        domain_length: float = 1.0,
+        grid_points: int = 256,
+        slope: float = 30.0,
+        bias: float = 0.0,
+        coupling: float = 2.0,
+        coupling_width: float = 0.12,
+        device: str = "cpu",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        summary = analyze_coupled_channel_surfaces(
+            domain_length=domain_length,
+            grid_points=grid_points,
+            slope=slope,
+            bias=bias,
+            coupling=coupling,
+            coupling_width=coupling_width,
+            device=device,
+        )
+        if output_dir is not None:
+            write_reduced_model_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "solve_radial_reduction", "Solve a bounded radial effective-coordinate reduction with explicit angular-momentum and base-potential parameters.", bounded=True)
+    def solve_radial_reduction_tool(
+        family: str,
+        parameters: dict[str, float],
+        angular_momentum: int = 0,
+        radial_min: float = 0.05,
+        radial_max: float = 3.0,
+        num_points: int = 128,
+        num_states: int = 6,
+        mass: float = 1.0,
+        hbar: float = 1.0,
+        device: str = "cpu",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        summary = solve_radial_reduction(
+            family=family,
+            parameters={str(name): float(value) for name, value in parameters.items()},
+            angular_momentum=angular_momentum,
+            radial_min=radial_min,
+            radial_max=radial_max,
+            num_points=num_points,
+            num_states=num_states,
+            mass=mass,
+            hbar=hbar,
+            device=device,
+        )
+        if output_dir is not None:
+            write_reduced_model_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "design_transition", "Optimize a parameterized potential family so a selected spectral transition matches a target value.", bounded=True)
+    def design_transition_tool(
+        family: str,
+        target_transition: float,
+        initial_guess: dict[str, float],
+        transition_indices: list[int] | None = None,
+        domain_length: float = 1.0,
+        left: float = 0.0,
+        mass: float = 1.0,
+        hbar: float = 1.0,
+        num_points: int = 128,
+        num_states: int = 4,
+        steps: int = 200,
+        learning_rate: float = 0.05,
+        device: str = "auto",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        pair = (0, 1) if transition_indices is None else tuple(int(value) for value in transition_indices)
+        summary = design_potential_for_target_transition(
+            family=family,
+            target_transition=target_transition,
+            transition_indices=pair,
+            initial_guess={str(name): float(value) for name, value in initial_guess.items()},
+            domain_length=domain_length,
+            left=left,
+            mass=mass,
+            hbar=hbar,
+            num_points=num_points,
+            num_states=num_states,
+            optimization_config=GradientOptimizationConfig(steps=steps, learning_rate=learning_rate),
+            device=device,
+        )
+        if output_dir is not None:
+            write_differentiable_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "optimize_packet_control", "Optimize Gaussian packet preparation parameters for a target observable using differentiable spectral propagation.", bounded=True)
+    def optimize_packet_control_tool(
+        center: float = 0.30,
+        width: float = 0.07,
+        wavenumber: float = 25.0,
+        phase: float = 0.0,
+        objective: str = "target_position",
+        target_value: float = 0.60,
+        final_time: float = 0.01,
+        interval: list[float] | None = None,
+        num_modes: int = 96,
+        quadrature_points: int = 2048,
+        grid_points: int = 128,
+        steps: int = 200,
+        learning_rate: float = 0.05,
+        device: str = "auto",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        summary = optimize_packet_control(
+            initial_guess={
+                "center": center,
+                "width": width,
+                "wavenumber": wavenumber,
+                "phase": phase,
+            },
+            objective=objective,  # type: ignore[arg-type]
+            target_value=target_value,
+            final_time=final_time,
+            interval=None if interval is None else (float(interval[0]), float(interval[1])),
+            num_modes=num_modes,
+            quadrature_points=quadrature_points,
+            grid_points=grid_points,
+            optimization_config=GradientOptimizationConfig(steps=steps, learning_rate=learning_rate),
+            device=device,
+        )
+        if output_dir is not None:
+            write_differentiable_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "transport_workflow", "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.", bounded=True)
+    def transport_workflow_tool(
+        barrier_height: float = 50.0,
+        barrier_width_sigma: float = 0.03,
+        domain_length: float = 1.0,
+        grid_points: int = 512,
+        num_modes: int = 128,
+        num_energies: int = 500,
+        packet_center: float = 0.25,
+        packet_width: float = 0.04,
+        packet_wavenumber: float = 40.0,
+        device: str = "cpu",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        summary = run_transport_resonance_workflow(
+            barrier_height=barrier_height,
+            barrier_width_sigma=barrier_width_sigma,
+            domain_length=domain_length,
+            grid_points=grid_points,
+            num_modes=num_modes,
+            num_energies=num_energies,
+            packet_center=packet_center,
+            packet_width=packet_width,
+            packet_wavenumber=packet_wavenumber,
+            device=device,
+        )
+        if output_dir is not None:
+            write_vertical_workflow_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
+    @_tool(server, runtime, "profile_inference_workflow", "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.", bounded=True)
+    def profile_inference_workflow_tool(
+        table_path: str,
+        center: float = 0.36,
+        width: float = 0.11,
+        wavenumber: float = 22.0,
+        phase: float = 0.0,
+        analyze_num_modes: int = 16,
+        compress_num_modes: int = 8,
+        inverse_num_modes: int = 96,
+        feature_num_modes: int = 16,
+        quadrature_points: int = 2048,
+        normalize_each_profile: bool = False,
+        device: str = "auto",
+        output_dir: str | None = None,
+    ) -> dict[str, Any]:
+        summary = run_profile_inference_workflow(
+            table_path,
+            initial_guess={
+                "center": center,
+                "width": width,
+                "wavenumber": wavenumber,
+                "phase": phase,
+            },
+            analyze_num_modes=analyze_num_modes,
+            compress_num_modes=compress_num_modes,
+            inverse_num_modes=inverse_num_modes,
+            feature_num_modes=feature_num_modes,
+            quadrature_points=quadrature_points,
+            normalize_each_profile=normalize_each_profile,
+            device=device,
+        )
+        if output_dir is not None:
+            write_vertical_workflow_artifacts(output_dir, summary)
+        return to_serializable(summary)
+
     @_tool(server, runtime, "compare_profile_tables", "Compare candidate and reference profile tables with domain-aware error metrics.", bounded=True)
     def compare_profile_tables_tool(
         reference_table_path: str,
@@ -612,11 +1041,12 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def describe_database_table_tool(database: str, table_name: str) -> dict[str, Any]:
         return to_serializable(describe_database_table(database, table_name))
 
-    @_tool(server, runtime, "query_database", "Run a read-only parameterized SQL query and return a tabular summary of the result.", bounded=True)
+    @_tool(server, runtime, "query_database", "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.", bounded=True)
     def query_database_tool(
         database: str,
         query: str,
         parameters: dict[str, Any] | None = None,
+        max_rows: int = 500,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         result = materialize_database_query(database, query, parameters=_coerce_parameters(parameters))
@@ -633,7 +1063,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                     parameters=_coerce_parameters(parameters),
                 ),
             )
-        return to_serializable(
+        summary = to_serializable(
             summarize_database_query_result(
                 database,
                 query,
@@ -641,6 +1071,39 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 parameters=_coerce_parameters(parameters),
             )
         )
+        # Include all rows (up to max_rows) so models don't need bash
+        all_rows = result.dataset.to_rows(limit=max_rows)
+        summary["table"]["rows"] = to_serializable(all_rows)
+        if result.dataset.row_count > max_rows:
+            summary["table"]["truncated"] = True
+            summary["table"]["hint"] = (
+                f"Result has {result.dataset.row_count} rows but only {max_rows} returned. "
+                f"Use export_query_csv for the full dataset, or add LIMIT to your query."
+            )
+        return summary
+
+    @_tool(server, runtime, "export_query_csv", "Run a SQL query and return the FULL result as inline CSV text. Use this when you need all rows, not just a preview. For large results (>1000 rows), consider adding a LIMIT clause.", bounded=True)
+    def export_query_csv_tool(
+        database: str,
+        query: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        import io
+        import csv as csv_mod
+        result = materialize_database_query(database, query, parameters=_coerce_parameters(parameters))
+        rows = result.dataset.to_rows()
+        columns = list(result.dataset.column_names)
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([row.get(c) for c in columns])
+        return {
+            "row_count": len(rows),
+            "column_count": len(columns),
+            "columns": columns,
+            "csv": buf.getvalue(),
+        }
 
     @_tool(server, runtime, "execute_database_statement", "Run a non-query SQL statement such as CREATE, INSERT, UPDATE, or DELETE against a managed database.", bounded=True)
     def execute_database_statement_tool(
@@ -2647,22 +3110,27 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         runtime,
         "create_scratch_database",
         "Create a temporary SQLite database in the managed scratch directory. "
-        "Optionally populate it with synthetic profile data. Returns the database path "
-        "for use with query_database and other SQL tools.",
+        "Optionally run an init_script to create tables and insert data (supports "
+        "CREATE TABLE, INSERT, and any DDL/DML). Optionally populate with synthetic "
+        "profile data. Returns the database path for use with query_database and "
+        "other SQL tools. Use init_script for custom schemas — this is the "
+        "recommended way to set up databases with user-defined tables.",
     )
     def create_scratch_database_tool(
         name: str = "scratch.db",
+        init_script: str | None = None,
         populate_synthetic: bool = False,
         num_profiles: int = 50,
         grid_points: int = 64,
         num_modes: int = 8,
         device: str = "cpu",
     ) -> dict[str, Any]:
-        _validate_synthetic_generation_request(
-            runtime.config,
-            num_profiles=num_profiles,
-            grid_points=grid_points,
-        )
+        if populate_synthetic:
+            _validate_synthetic_generation_request(
+                runtime.config,
+                num_profiles=num_profiles,
+                grid_points=grid_points,
+            )
         db_path = _managed_scratch_path(runtime.config, name)
 
         # Bootstrap the database
@@ -2671,6 +3139,18 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "database_path": str(db_path),
             "tables": list(db_info.tables) if hasattr(db_info, "tables") else [],
         }
+
+        # Run init script if provided (CREATE TABLE, INSERT, etc.)
+        if init_script is not None:
+            script_result = execute_database_script(
+                str(db_path), init_script, create_if_missing=True,
+            )
+            result["init_script"] = {
+                "statement_count": script_result.statement_count,
+            }
+            # Refresh table list after init
+            db_info_after = inspect_database(str(db_path))
+            result["tables"] = list(db_info_after.tables) if hasattr(db_info_after, "tables") else []
 
         if populate_synthetic:
             table = generate_synthetic_profile_table(

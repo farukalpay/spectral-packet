@@ -11,7 +11,10 @@ The core is a bounded-domain spectral engine for:
 - forward propagation,
 - observables,
 - truncation diagnostics,
-- inverse reconstruction.
+- inverse reconstruction,
+- local uncertainty-aware physical inference,
+- controlled reduced models,
+- differentiable design workflows.
 
 The engine also includes deep mathematical physics modules:
 
@@ -67,17 +70,23 @@ Advanced physics modules:
 - `src/spectral_packet_engine/quantum_info.py` — quantum information measures
 - `src/spectral_packet_engine/pipelines.py` — auto-parameterized analysis pipelines
 - `src/spectral_packet_engine/load_spectral.py` — spectral load modeling, adaptive throttling, anomaly detection
+- `src/spectral_packet_engine/parametric_potentials.py` — explicit parameterized potential families for inference and design
+- `src/spectral_packet_engine/reduced_models.py` — separable, coupled-channel, radial, and low-rank reduced-model surfaces
+- `src/spectral_packet_engine/differentiable_physics.py` — differentiable calibration and inverse-design workflows
+- `src/spectral_packet_engine/vertical_workflows.py` — domain-specific spectroscopy, transport, control, and tabular verticals
 
 ### 2. Workflow and artifact layer
 
 Shared user-facing workflows live in:
 
 - `src/spectral_packet_engine/workflows.py`
+- `src/spectral_packet_engine/vertical_workflows.py`
 - `src/spectral_packet_engine/diagnostics.py`
 - `src/spectral_packet_engine/artifacts.py`
 - `src/spectral_packet_engine/release_gate.py`
 
 This layer is the conductor between the engine and the public interfaces.
+It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, and vertical workflows are surfaced before any interface wrapper sees them.
 
 ### 3. Data and storage bridge
 
