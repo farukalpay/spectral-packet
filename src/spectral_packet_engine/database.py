@@ -742,6 +742,96 @@ class DatabaseConnection:
                 connection.execute(table.insert(), rows)
         return self.describe_table(table_name)
 
+    def coerce_column_types(self, table_name: str) -> TableSchemaSummary:
+        """Detect actual data types in a table and rebuild with proper affinity.
+
+        SQLite's ``CREATE TABLE AS SELECT`` often stores numeric values with
+        TEXT affinity.  This method samples all rows, infers the real type for
+        each column, and rebuilds the table with explicit column types so that
+        subsequent comparisons (e.g. ``WHERE col = 1``) use the correct
+        affinity.
+        """
+        self._ensure_connected()
+        if not self.config.is_sqlite:
+            return self.describe_table(table_name)
+
+        normalized_name = _quote_compound_identifier(table_name)
+        schema = self.describe_table(table_name)
+
+        needs_coercion = False
+        coerced_columns: list[TableColumnSpec] = []
+        for column in schema.columns:
+            if column.dtype != "TEXT":
+                coerced_columns.append(column)
+                continue
+            cursor = self._sqlite_connection.execute(
+                f"SELECT {_quote_identifier(column.name)} FROM {normalized_name} LIMIT 500"
+            )
+            values = [row[0] for row in cursor.fetchall()]
+            if not values or all(v is None for v in values):
+                coerced_columns.append(column)
+                continue
+            non_null = [v for v in values if v is not None]
+            all_integer = True
+            all_numeric = True
+            for v in non_null:
+                try:
+                    f = float(v)
+                    if not f.is_integer():
+                        all_integer = False
+                except (TypeError, ValueError):
+                    all_numeric = False
+                    all_integer = False
+                    break
+            if all_numeric and non_null:
+                inferred = "INTEGER" if all_integer else "REAL"
+                coerced_columns.append(TableColumnSpec(
+                    name=column.name, dtype=inferred,
+                    nullable=column.nullable, primary_key=column.primary_key,
+                    default=column.default,
+                ))
+                needs_coercion = True
+            else:
+                coerced_columns.append(column)
+
+        if not needs_coercion:
+            return schema
+
+        tmp_name = f"_coerce_tmp_{table_name.replace('.', '_')}"
+        normalized_tmp = _quote_compound_identifier(tmp_name)
+
+        col_defs = []
+        cast_exprs = []
+        for spec in coerced_columns:
+            parts = [_quote_identifier(spec.name), spec.dtype]
+            if not spec.nullable:
+                parts.append("NOT NULL")
+            if spec.primary_key:
+                parts.append("PRIMARY KEY")
+            if spec.default is not None:
+                parts.append(f"DEFAULT {_literal_sql(spec.default)}")
+            col_defs.append(" ".join(parts))
+            cast_exprs.append(
+                f"CAST({_quote_identifier(spec.name)} AS {spec.dtype})"
+            )
+        col_names = ", ".join(_quote_identifier(c.name) for c in coerced_columns)
+
+        with self._sqlite_connection:
+            self._sqlite_connection.execute(f"DROP TABLE IF EXISTS {normalized_tmp}")
+            self._sqlite_connection.execute(
+                f"CREATE TABLE {normalized_tmp} ({', '.join(col_defs)})"
+            )
+            self._sqlite_connection.execute(
+                f"INSERT INTO {normalized_tmp} ({col_names}) "
+                f"SELECT {', '.join(cast_exprs)} FROM {normalized_name}"
+            )
+            self._sqlite_connection.execute(f"DROP TABLE {normalized_name}")
+            self._sqlite_connection.execute(
+                f"ALTER TABLE {normalized_tmp} RENAME TO {_quote_identifier(table_name)}"
+            )
+        _log.info("Coerced column types for table %s", table_name)
+        return self.describe_table(table_name)
+
     def create_table_from_query(
         self,
         target_table: str,
@@ -749,6 +839,7 @@ class DatabaseConnection:
         *,
         parameters: Mapping[str, Any] | None = None,
         replace: bool = False,
+        coerce_types: bool = True,
     ) -> TableSchemaSummary:
         self._ensure_connected()
         normalized_target = _quote_compound_identifier(target_table)
@@ -766,6 +857,8 @@ class DatabaseConnection:
                 if self._table_exists(target_table):
                     raise ValueError(f"table already exists: {target_table}") from exc
                 raise
+            if coerce_types:
+                return self.coerce_column_types(target_table)
         else:
             sqlalchemy = _require_sqlalchemy()
             schema_name, resolved_table_name = _split_table_reference(target_table)
@@ -786,6 +879,211 @@ class DatabaseConnection:
                     raise ValueError(f"table already exists: {target_table}") from exc
                 raise
         return self.describe_table(target_table)
+
+
+    def pivot_query(
+        self,
+        table_name: str,
+        index_column: str,
+        pivot_column: str,
+        value_column: str,
+        *,
+        aggregate: str = "MAX",
+    ) -> str:
+        """Generate a SQL pivot query for the given table.
+
+        Returns the raw SQL string that can be executed or materialized.
+        """
+        self._ensure_connected()
+        normalized_name = _quote_compound_identifier(table_name)
+        cursor_sql = (
+            f"SELECT DISTINCT {_quote_identifier(pivot_column)} "
+            f"FROM {normalized_name} ORDER BY {_quote_identifier(pivot_column)}"
+        )
+        if self.config.is_sqlite:
+            cursor = self._sqlite_connection.execute(cursor_sql)
+            distinct_values = [row[0] for row in cursor.fetchall()]
+        else:
+            sqlalchemy = _require_sqlalchemy()
+            with self._engine.connect() as connection:
+                result = connection.execute(sqlalchemy.text(cursor_sql))
+                distinct_values = [row[0] for row in result.fetchall()]
+
+        agg = aggregate.upper()
+        case_clauses = []
+        for val in distinct_values:
+            alias = f"x={val}" if isinstance(val, (int, float)) else str(val)
+            case_clauses.append(
+                f"{agg}(CASE WHEN {_quote_identifier(pivot_column)} = {_literal_sql(val)} "
+                f"THEN CAST({_quote_identifier(value_column)} AS REAL) END) AS {_quote_identifier(alias)}"
+            )
+        return (
+            f"SELECT {_quote_identifier(index_column)}, {', '.join(case_clauses)} "
+            f"FROM {normalized_name} GROUP BY {_quote_identifier(index_column)}"
+        )
+
+    def unpivot_query(
+        self,
+        table_name: str,
+        id_columns: Sequence[str],
+        value_columns: Sequence[str] | None = None,
+    ) -> str:
+        """Generate a SQL unpivot (melt) query for the given table.
+
+        Returns the raw SQL string.
+        """
+        self._ensure_connected()
+        if value_columns is None:
+            schema = self.describe_table(table_name)
+            id_set = set(id_columns)
+            value_columns = [c.name for c in schema.columns if c.name not in id_set]
+        if not value_columns:
+            raise ValueError("no value columns to unpivot")
+
+        normalized_name = _quote_compound_identifier(table_name)
+        id_select = ", ".join(_quote_identifier(c) for c in id_columns)
+        unions = []
+        for col in value_columns:
+            unions.append(
+                f"SELECT {id_select}, {_literal_sql(col)} AS variable, "
+                f"CAST({_quote_identifier(col)} AS REAL) AS value "
+                f"FROM {normalized_name}"
+            )
+        return " UNION ALL ".join(unions)
+
+    def interpolate_time_series(
+        self,
+        table_name: str,
+        time_column: str,
+        value_columns: Sequence[str],
+        *,
+        step: float = 1.0,
+        method: str = "linear",
+    ) -> str:
+        """Generate SQL for linear interpolation over time gaps.
+
+        Returns a query that fills missing time steps with linearly
+        interpolated values using window functions.
+        """
+        normalized_name = _quote_compound_identifier(table_name)
+        tc = _quote_identifier(time_column)
+
+        series_cte = (
+            f"WITH bounds AS ("
+            f"  SELECT MIN(CAST({tc} AS REAL)) AS t_min, MAX(CAST({tc} AS REAL)) AS t_max "
+            f"  FROM {normalized_name}"
+            f"), "
+            f"series(t) AS ("
+            f"  SELECT t_min FROM bounds "
+            f"  UNION ALL SELECT t + {_literal_sql(step)} FROM series, bounds WHERE t < t_max"
+            f"), "
+            f"src AS ("
+            f"  SELECT CAST({tc} AS REAL) AS t, "
+            + ", ".join(
+                f"CAST({_quote_identifier(c)} AS REAL) AS {_quote_identifier(c)}"
+                for c in value_columns
+            )
+            + f" FROM {normalized_name}"
+            f")"
+        )
+
+        interp_cols = []
+        for col in value_columns:
+            qc = _quote_identifier(col)
+            interp_cols.append(
+                f"CASE WHEN src.{qc} IS NOT NULL THEN src.{qc} ELSE "
+                f"prev.{qc} + (next_.{qc} - prev.{qc}) * "
+                f"(series.t - prev.t) / NULLIF(next_.t - prev.t, 0) "
+                f"END AS {qc}"
+            )
+
+        return (
+            f"{series_cte} "
+            f"SELECT series.t AS {tc}, {', '.join(interp_cols)} "
+            f"FROM series "
+            f"LEFT JOIN src ON src.t = series.t "
+            f"LEFT JOIN src AS prev ON prev.t = ("
+            f"  SELECT MAX(s2.t) FROM src s2 WHERE s2.t <= series.t AND s2.{_quote_identifier(value_columns[0])} IS NOT NULL"
+            f") "
+            f"LEFT JOIN src AS next_ ON next_.t = ("
+            f"  SELECT MIN(s3.t) FROM src s3 WHERE s3.t >= series.t AND s3.{_quote_identifier(value_columns[0])} IS NOT NULL"
+            f") "
+            f"ORDER BY series.t"
+        )
+
+    def upsert_rows(
+        self,
+        table_name: str,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        conflict_columns: Sequence[str],
+    ) -> int:
+        """Insert rows, updating on conflict (INSERT OR REPLACE for SQLite,
+        ON CONFLICT DO UPDATE for PostgreSQL)."""
+        rows_list = list(rows)
+        if not rows_list:
+            return 0
+        self._ensure_connected()
+        column_names = list(rows_list[0].keys())
+        normalized_name = _quote_compound_identifier(table_name)
+
+        if self.config.is_sqlite:
+            placeholders = ", ".join(f":{name}" for name in column_names)
+            col_list = ", ".join(_quote_identifier(c) for c in column_names)
+            statement = (
+                f"INSERT OR REPLACE INTO {normalized_name} ({col_list}) VALUES ({placeholders})"
+            )
+            with self._sqlite_connection:
+                self._sqlite_connection.executemany(statement, rows_list)
+            return len(rows_list)
+        else:
+            sqlalchemy = _require_sqlalchemy()
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            schema_name, resolved_table_name = _split_table_reference(table_name)
+            metadata = sqlalchemy.MetaData()
+            table = sqlalchemy.Table(
+                resolved_table_name, metadata, schema=schema_name, autoload_with=self._engine
+            )
+            with self._engine.begin() as connection:
+                stmt = pg_insert(table).values(rows_list)
+                update_cols = {c.name: c for c in stmt.excluded if c.name not in conflict_columns}
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=conflict_columns, set_=update_cols
+                )
+                connection.execute(stmt)
+            return len(rows_list)
+
+    def window_aggregate_query(
+        self,
+        table_name: str,
+        value_column: str,
+        *,
+        order_by: str,
+        window_size: int = 3,
+        functions: Sequence[str] = ("AVG", "SUM", "COUNT"),
+    ) -> str:
+        """Generate a query with sliding window aggregates."""
+        normalized_name = _quote_compound_identifier(table_name)
+        vc = _quote_identifier(value_column)
+        ob = _quote_identifier(order_by)
+        window_spec = f"OVER (ORDER BY {ob} ROWS BETWEEN {window_size // 2} PRECEDING AND {window_size // 2} FOLLOWING)"
+
+        cols = [f"{ob}", f"{vc}"]
+        for fn in functions:
+            alias = f"{fn.lower()}_{value_column}_w{window_size}"
+            cols.append(f"{fn.upper()}(CAST({vc} AS REAL)) {window_spec} AS {_quote_identifier(alias)}")
+        return f"SELECT {', '.join(cols)} FROM {normalized_name} ORDER BY {ob}"
+
+    def batch_query(
+        self,
+        query_template: str,
+        parameter_sets: Sequence[Mapping[str, Any]],
+    ) -> list[QueryResult]:
+        """Execute a parameterized query with multiple parameter sets."""
+        results = []
+        for params in parameter_sets:
+            results.append(self.query(query_template, parameters=params))
+        return results
 
 
 def inspect_database_capabilities(config: DatabaseConfig | str | Path) -> DatabaseCapabilityReport:

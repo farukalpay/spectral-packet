@@ -99,9 +99,22 @@ from spectral_packet_engine.workflows import (
     train_modal_surrogate_on_profile_table,
     train_tensorflow_surrogate_on_profile_table,
     tune_tree_model,
+    coerce_database_table_types,
+    pivot_database_table,
+    unpivot_database_table,
+    interpolate_database_time_series,
+    window_aggregate_database_query,
     validate_installation,
     write_profile_table_to_database,
     write_tabular_dataset_to_database,
+)
+from spectral_packet_engine.spectral_extensions import (
+    fourier_decomposition,
+    pade_approximant,
+    hilbert_transform,
+    correlation_spectral_analysis,
+    richardson_extrapolation,
+    kramers_kronig,
 )
 
 
@@ -660,6 +673,85 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 query,
                 parameters=_coerce_parameters(parameters),
                 replace=replace,
+            )
+        )
+
+    @_tool(server, runtime, "coerce_table_types", "Detect and fix column type affinities for an existing database table. Converts TEXT columns containing numeric data to INTEGER or REAL.", bounded=True)
+    def coerce_table_types_tool(
+        database: str,
+        table_name: str,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            coerce_database_table_types(database, table_name)
+        )
+
+    @_tool(server, runtime, "pivot_table", "Pivot a long-format table into wide format. Turns distinct values in pivot_column into separate columns.", bounded=True)
+    def pivot_table_tool(
+        database: str,
+        table_name: str,
+        target_table: str,
+        index_column: str,
+        pivot_column: str,
+        value_column: str,
+        aggregate: str = "MAX",
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            pivot_database_table(
+                database, table_name, target_table,
+                index_column, pivot_column, value_column,
+                aggregate=aggregate, replace=replace,
+            )
+        )
+
+    @_tool(server, runtime, "unpivot_table", "Unpivot (melt) a wide-format table into long format with variable/value columns.", bounded=True)
+    def unpivot_table_tool(
+        database: str,
+        table_name: str,
+        target_table: str,
+        id_columns: list[str],
+        value_columns: list[str] | None = None,
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            unpivot_database_table(
+                database, table_name, target_table,
+                id_columns, value_columns, replace=replace,
+            )
+        )
+
+    @_tool(server, runtime, "interpolate_time_series", "Fill missing time steps in a table using linear interpolation and persist the result.", bounded=True)
+    def interpolate_time_series_tool(
+        database: str,
+        table_name: str,
+        target_table: str,
+        time_column: str,
+        value_columns: list[str],
+        step: float = 1.0,
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            interpolate_database_time_series(
+                database, table_name, target_table,
+                time_column, value_columns,
+                step=step, replace=replace,
+            )
+        )
+
+    @_tool(server, runtime, "window_aggregate", "Compute sliding window aggregates (AVG, SUM, COUNT, etc.) over a column.", bounded=True)
+    def window_aggregate_tool(
+        database: str,
+        table_name: str,
+        value_column: str,
+        order_by: str,
+        window_size: int = 3,
+        functions: list[str] | None = None,
+    ) -> dict[str, Any]:
+        fns = tuple(functions) if functions else ("AVG", "SUM", "COUNT")
+        return to_serializable(
+            window_aggregate_database_query(
+                database, table_name, value_column, order_by,
+                window_size=window_size, functions=fns,
             )
         )
 
@@ -2966,6 +3058,71 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 "best_effort_ipv4 is a best-effort hostname resolution only."
             ),
         }
+
+    # -----------------------------------------------------------------------
+    # Spectral extension tools
+    # -----------------------------------------------------------------------
+
+    @_tool(server, runtime, "fourier_decomposition", "Compute discrete Fourier decomposition of a 1-D signal, reporting dominant frequencies, amplitudes, phases, and power spectrum.", bounded=True)
+    def fourier_decomposition_tool(
+        signal: list[float],
+        sample_spacing: float = 1.0,
+        num_dominant: int = 5,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            fourier_decomposition(signal, sample_spacing=sample_spacing, num_dominant=num_dominant)
+        )
+
+    @_tool(server, runtime, "pade_approximant", "Construct a [m/n] Padé approximant from power series coefficients for rational extrapolation.", bounded=True)
+    def pade_approximant_tool(
+        coefficients: list[float],
+        order_m: int = 3,
+        order_n: int = 3,
+        evaluation_points: list[float] | None = None,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            pade_approximant(
+                coefficients, order_m=order_m, order_n=order_n,
+                evaluation_points=evaluation_points,
+            )
+        )
+
+    @_tool(server, runtime, "hilbert_transform", "Compute the analytic signal via Hilbert transform to extract instantaneous amplitude and phase envelopes.", bounded=True)
+    def hilbert_transform_tool(
+        signal: list[float],
+    ) -> dict[str, Any]:
+        return to_serializable(hilbert_transform(signal))
+
+    @_tool(server, runtime, "correlation_spectral_analysis", "Eigenvalue decomposition of the cross-correlation matrix among multiple profiles (PCA-style), revealing independent driving modes.", bounded=True)
+    def correlation_spectral_analysis_tool(
+        profiles: list[list[float]],
+        significance_threshold: float = 0.05,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            correlation_spectral_analysis(profiles, significance_threshold=significance_threshold)
+        )
+
+    @_tool(server, runtime, "richardson_extrapolation", "Accelerate convergence of a sequence of numerical estimates by removing leading error terms.", bounded=True)
+    def richardson_extrapolation_tool(
+        estimates: list[float],
+        step_ratio: float = 2.0,
+        convergence_order: float | None = None,
+    ) -> dict[str, Any]:
+        return to_serializable(
+            richardson_extrapolation(
+                estimates, step_ratio=step_ratio, convergence_order=convergence_order,
+            )
+        )
+
+    @_tool(server, runtime, "kramers_kronig", "Compute Kramers-Kronig dispersion relation connecting real and imaginary parts of a causal response function.", bounded=True)
+    def kramers_kronig_tool(
+        frequencies: list[float],
+        values: list[float],
+        direction: str = "real_to_imag",
+    ) -> dict[str, Any]:
+        return to_serializable(
+            kramers_kronig(frequencies, values, direction=direction)
+        )
 
     return server
 

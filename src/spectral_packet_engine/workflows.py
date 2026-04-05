@@ -1402,6 +1402,133 @@ def materialize_database_query_to_table(
     )
 
 
+def coerce_database_table_types(
+    database: DatabaseConfig | str | Any,
+    table_name: str,
+    *,
+    create_if_missing: bool = False,
+) -> DatabaseMaterializationSummary:
+    """Detect and fix column type affinities for an existing table."""
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        schema = connection.coerce_column_types(table_name)
+    return DatabaseMaterializationSummary(
+        redacted_url=config.redacted_url,
+        table_name=table_name,
+        source_query="(type coercion)",
+        schema=schema,
+        replace=False,
+    )
+
+
+def pivot_database_table(
+    database: DatabaseConfig | str | Any,
+    table_name: str,
+    target_table: str,
+    index_column: str,
+    pivot_column: str,
+    value_column: str,
+    *,
+    aggregate: str = "MAX",
+    replace: bool = False,
+    create_if_missing: bool = True,
+) -> DatabaseMaterializationSummary:
+    """Pivot a long-format table into wide format and persist the result."""
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        pivot_sql = connection.pivot_query(
+            table_name, index_column, pivot_column, value_column, aggregate=aggregate,
+        )
+        schema = connection.create_table_from_query(
+            target_table, pivot_sql, replace=replace,
+        )
+    return DatabaseMaterializationSummary(
+        redacted_url=config.redacted_url,
+        table_name=target_table,
+        source_query=pivot_sql,
+        schema=schema,
+        replace=replace,
+    )
+
+
+def unpivot_database_table(
+    database: DatabaseConfig | str | Any,
+    table_name: str,
+    target_table: str,
+    id_columns: Sequence[str],
+    value_columns: Sequence[str] | None = None,
+    *,
+    replace: bool = False,
+    create_if_missing: bool = True,
+) -> DatabaseMaterializationSummary:
+    """Unpivot (melt) a wide-format table into long format and persist."""
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        unpivot_sql = connection.unpivot_query(
+            table_name, id_columns, value_columns,
+        )
+        schema = connection.create_table_from_query(
+            target_table, unpivot_sql, replace=replace,
+        )
+    return DatabaseMaterializationSummary(
+        redacted_url=config.redacted_url,
+        table_name=target_table,
+        source_query=unpivot_sql,
+        schema=schema,
+        replace=replace,
+    )
+
+
+def interpolate_database_time_series(
+    database: DatabaseConfig | str | Any,
+    table_name: str,
+    target_table: str,
+    time_column: str,
+    value_columns: Sequence[str],
+    *,
+    step: float = 1.0,
+    replace: bool = False,
+    create_if_missing: bool = True,
+) -> DatabaseMaterializationSummary:
+    """Interpolate missing time steps in a time series and persist."""
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        interp_sql = connection.interpolate_time_series(
+            table_name, time_column, value_columns, step=step,
+        )
+        schema = connection.create_table_from_query(
+            target_table, interp_sql, replace=replace,
+        )
+    return DatabaseMaterializationSummary(
+        redacted_url=config.redacted_url,
+        table_name=target_table,
+        source_query=interp_sql,
+        schema=schema,
+        replace=replace,
+    )
+
+
+def window_aggregate_database_query(
+    database: DatabaseConfig | str | Any,
+    table_name: str,
+    value_column: str,
+    order_by: str,
+    *,
+    window_size: int = 3,
+    functions: Sequence[str] = ("AVG", "SUM", "COUNT"),
+    create_if_missing: bool = False,
+) -> DatabaseQuerySummary:
+    """Run a sliding window aggregate query and return results."""
+    config = _coerce_database_config(database, create_if_missing=create_if_missing)
+    with DatabaseConnection(config) as connection:
+        query = connection.window_aggregate_query(
+            table_name, value_column, order_by=order_by,
+            window_size=window_size, functions=functions,
+        )
+        result = connection.query(query)
+    return summarize_database_query_result(database, query, result)
+
+
 def analyze_profile_table_from_database_query(
     database: DatabaseConfig | str | Any,
     query: str,
@@ -2402,6 +2529,7 @@ __all__ = [
     "build_profile_table_report",
     "build_profile_table_report_from_database_query",
     "bootstrap_local_database",
+    "coerce_database_table_types",
     "build_engine",
     "compare_profile_tables",
     "compress_profile_table",
@@ -2420,6 +2548,7 @@ __all__ = [
     "fit_gaussian_packet_to_profile_table_from_database_query",
     "inspect_database",
     "inspect_environment",
+    "interpolate_database_time_series",
     "inspect_ml_backend_support",
     "inspect_tree_backend_support",
     "list_database_tables",
@@ -2430,6 +2559,7 @@ __all__ = [
     "materialize_database_query",
     "materialize_profile_table_from_database_query",
     "materialize_database_query_to_table",
+    "pivot_database_table",
     "project_gaussian_packet",
     "simulate_gaussian_packet",
     "simulate_packet_sweep",
@@ -2442,7 +2572,9 @@ __all__ = [
     "train_modal_surrogate_on_profile_table",
     "train_tensorflow_surrogate_on_profile_table",
     "tune_tree_model",
+    "unpivot_database_table",
     "validate_installation",
+    "window_aggregate_database_query",
     "write_profile_table_to_database",
     "write_tabular_dataset_to_database",
 ]
