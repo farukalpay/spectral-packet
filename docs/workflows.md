@@ -502,6 +502,7 @@ Expected operations through the client:
 
 - inspect the shared product and runtime contract,
 - ask `guide_workflow` for the default operator path before composing a tool chain,
+- ask `plan_experiment` when the user has a short experiment intent but not the tool order,
 - inspect the MCP runtime and environment,
 - validate the installation,
 - run `profile_table_report` or `report_database_profile_query`,

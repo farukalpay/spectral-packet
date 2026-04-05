@@ -47,6 +47,7 @@ from spectral_packet_engine.mcp_runtime import (
     inspect_mcp_runtime,
     resolve_mcp_scratch_file,
 )
+from spectral_packet_engine.tool_catalog import ToolCatalog
 from spectral_packet_engine.ml import ModalSurrogateConfig
 from spectral_packet_engine.config import SERVER_PURPOSE
 from spectral_packet_engine.product import (
@@ -369,8 +370,44 @@ def _tool_error_payload(tool_name: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-def _tool(server, runtime: _MCPExecutionController, name: str, description: str, *, bounded: bool = False):
+def _catalog_for_server(server) -> ToolCatalog | None:
+    return getattr(server, "_spectral_tool_catalog", None)
+
+
+def _augment_tool_payload(server, tool_name: str, payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    if "related_tools" in payload:
+        return payload
+    catalog = _catalog_for_server(server)
+    related_tools = () if catalog is None else catalog.related_tools(tool_name)
+    enriched = dict(payload)
+    enriched["related_tools"] = list(related_tools)
+    return enriched
+
+
+def _tool(
+    server,
+    runtime: _MCPExecutionController,
+    name: str,
+    description: str,
+    *,
+    bounded: bool = False,
+    intent_phrases: tuple[str, ...] = (),
+):
     def decorator(function):
+        catalog = _catalog_for_server(server)
+        resolved_description = description
+        if catalog is not None:
+            catalog.register(
+                name,
+                description,
+                function,
+                bounded=bounded,
+                intent_phrases=intent_phrases,
+            )
+            resolved_description = catalog.describe(name, description)
+
         @wraps(function)
         def wrapped(*args, **kwargs):
             # Rate limiting — applies to every tool call
@@ -390,22 +427,22 @@ def _tool(server, runtime: _MCPExecutionController, name: str, description: str,
             ) as _task_id:
                 try:
                     if not bounded:
-                        return function(*args, **kwargs)
+                        return _augment_tool_payload(server, name, function(*args, **kwargs))
                     slot_info = runtime.acquire()
                     try:
                         result = function(*args, **kwargs)
                         if isinstance(result, dict) and bounded:
                             result["_execution"] = slot_info
-                        return result
+                        return _augment_tool_payload(server, name, result)
                     finally:
                         runtime.release()
                 except Exception as exc:
                     mark_service_task_failed(_task_id, exc)
-                    return _tool_error_payload(name, exc)
+                    return _augment_tool_payload(server, name, _tool_error_payload(name, exc))
 
         return server.tool(
             name=name,
-            description=description,
+            description=resolved_description,
             structured_output=True,
         )(wrapped)
 
@@ -434,16 +471,66 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         streamable_http_path=runtime_config.streamable_http_path,
         transport_security=_build_transport_security_settings(runtime_config),
     )
+    server._spectral_tool_catalog = ToolCatalog()
 
-    @_tool(server, runtime, "inspect_product", "Return engine identity: version, basis family, supported domains, and registered workflow map.")
+    @_tool(
+        server,
+        runtime,
+        "inspect_product",
+        "Return engine identity: version, basis family, supported domains, and registered workflow map.",
+        intent_phrases=(
+            "the user asks what this engine is for",
+            "the user needs the product spine or workflow map before choosing a tool",
+        ),
+    )
     def inspect_product_tool() -> dict[str, Any]:
         return to_serializable(inspect_product_identity())
 
-    @_tool(server, runtime, "guide_workflow", "Recommend a workflow (report, inverse-fit, or feature-export) with sensible defaults for the given input kind and goal.")
+    @_tool(
+        server,
+        runtime,
+        "guide_workflow",
+        "Recommend a workflow (report, inverse-fit, or feature-export) with sensible defaults for the given input kind and goal.",
+        intent_phrases=(
+            "the user wants the default product-level path for report, inverse-fit, or feature-model work",
+            "the user needs workflow guidance before calling lower-level tools",
+        ),
+    )
     def guide_workflow_tool(input_kind: str = "profile-table-file", goal: str = "report") -> dict[str, Any]:
         return to_serializable(guide_workflow(surface="mcp", input_kind=input_kind, goal=goal))
 
-    @_tool(server, runtime, "inspect_environment", "Report CPU/GPU availability, PyTorch device selection, thread counts, and optional backend status (TensorFlow, JAX, SQL).")
+    @_tool(
+        server,
+        runtime,
+        "plan_experiment",
+        "Translate a short natural-language scientific intent into a structured MCP tool chain without filling parameter values.",
+        intent_phrases=(
+            "the user gives a short experiment intent and wants a tool chain",
+            "the caller wants ordering guidance but will choose parameters separately",
+        ),
+    )
+    def plan_experiment_tool(intent: str, max_steps: int = 4) -> dict[str, Any]:
+        catalog = _catalog_for_server(server)
+        if catalog is None:
+            return {
+                "intent": intent,
+                "anchor_tool": None,
+                "plan_steps": [],
+                "considered_tools": [],
+                "notes": ["Tool catalog is unavailable, so no plan could be generated."],
+            }
+        return catalog.plan(intent, max_steps=max_steps).to_dict()
+
+    @_tool(
+        server,
+        runtime,
+        "inspect_environment",
+        "Report CPU/GPU availability, PyTorch device selection, thread counts, and optional backend status (TensorFlow, JAX, SQL).",
+        intent_phrases=(
+            "the user asks whether the machine is ready for spectral compute",
+            "the caller needs backend or device availability before running heavy tools",
+        ),
+    )
     def inspect_environment_tool(device: str = "auto") -> dict[str, Any]:
         return to_serializable(inspect_environment(device))
 
@@ -1053,7 +1140,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_differentiable_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "transport_workflow", "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "transport_workflow",
+        "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants an end-to-end tunneling, barrier, or resonance analysis",
+            "the caller wants the transport bundle instead of manually chaining scattering and propagation tools",
+        ),
+    )
     def transport_workflow_tool(
         barrier_height: float = 50.0,
         barrier_width_sigma: float = 0.03,
@@ -1083,7 +1180,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_vertical_workflow_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "profile_inference_workflow", "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "profile_inference_workflow",
+        "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants report, inverse reconstruction, and feature export on the same profile table",
+            "the caller wants one tabular-science workflow instead of separate report and inverse steps",
+        ),
+    )
     def profile_inference_workflow_tool(
         table_path: str,
         center: float = 0.36,
@@ -1147,7 +1254,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def describe_database_table_tool(database: str, table_name: str) -> dict[str, Any]:
         return to_serializable(describe_database_table(database, table_name))
 
-    @_tool(server, runtime, "query_database", "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "query_database",
+        "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants to inspect or retrieve rows from a managed database",
+            "the caller needs read-only SQL access without shelling into SQLite",
+        ),
+    )
     def query_database_tool(
         database: str,
         query: str,
@@ -2098,6 +2215,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_quantum_state_pipeline",
         "Analyze a Gaussian wavepacket in the infinite-well basis: eigenexpansion, energy/momentum expectation values, Heisenberg uncertainty product, spectral entropy, convergence diagnostics, and Wigner function negativity.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a full quantum-state diagnostic from packet parameters",
+            "the caller wants one wavepacket analysis instead of separate energy, uncertainty, and Wigner calls",
+        ),
     )
     def analyze_quantum_state_pipeline_tool(
         center: float = 0.30,
@@ -2129,6 +2250,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_potential_pipeline",
         "Analyze a 1D potential (harmonic, double-well, Morse, or custom): compute eigenvalues, compare against WKB semiclassical approximation, evaluate partition function, spectral zeta, and Weyl asymptotic law.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a broad spectral characterization of a potential family",
+            "the caller wants eigenvalues, semiclassical checks, and thermodynamic diagnostics together",
+        ),
     )
     def analyze_potential_pipeline_tool(
         potential: str = "harmonic",
@@ -2164,6 +2289,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_scattering_pipeline",
         "Full scattering analysis: transmission spectrum, resonances, S-matrix, WKB tunneling comparison — energy range auto-determined from barrier heights.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a scattering or barrier transmission analysis without picking every subtool",
+            "the caller asks about resonances, transmission spectra, or tunneling through a barrier",
+        ),
     )
     def analyze_scattering_pipeline_tool(
         barrier_type: str = "double",
@@ -2342,6 +2471,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "compute_wigner_function",
         "Compute the Wigner quasi-probability distribution W(x,p) for a Gaussian wavepacket. Returns negativity (non-classicality witness) and marginals.",
         bounded=True,
+        intent_phrases=(
+            "the user asks whether a state looks quantum or classical",
+            "the caller wants phase-space diagnostics, Wigner negativity, or non-classicality evidence",
+        ),
     )
     def compute_wigner_function_tool(
         center: float = 0.5,
@@ -2455,6 +2588,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "perturbation_analysis",
         "Apply quantum perturbation theory (1st and 2nd order) to analyze how a perturbation modifies energy levels of the infinite well.",
         bounded=True,
+        intent_phrases=(
+            "the user wants to see how a small perturbation changes energy levels",
+            "the caller asks whether perturbation theory is valid for a modified well",
+        ),
     )
     def perturbation_analysis_tool(
         perturbation_type: str = "linear_slope",
@@ -2500,6 +2637,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "wkb_analysis",
         "WKB semiclassical analysis: Bohr-Sommerfeld quantization and tunneling probability for 1D potentials.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a semiclassical comparison for spectra or tunneling",
+            "the caller asks for WKB, Bohr-Sommerfeld, or barrier transmission estimates",
+        ),
     )
     def wkb_analysis_tool(
         potential: str = "harmonic",
@@ -2684,6 +2825,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "scattering_analysis",
         "Compute quantum scattering through a potential barrier: transmission T(E), reflection R(E), resonances, and S-matrix unitarity.",
         bounded=True,
+        intent_phrases=(
+            "the user asks for transmission, reflection, or resonance structure through a barrier",
+            "the caller wants resolved scattering curves rather than a bundled workflow",
+        ),
     )
     def scattering_analysis_tool(
         barrier_type: str = "rectangular",
@@ -2722,6 +2867,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "berry_phase_analysis",
         "Compute the Berry (geometric) phase for a spin-½ system in a rotating magnetic field. Validates against the analytical solid-angle formula.",
         bounded=True,
+        intent_phrases=(
+            "the user asks about geometric phase, Berry phase, or adiabatic phase accumulation",
+            "the caller wants topology-style phase diagnostics for a closed parameter loop",
+        ),
     )
     def berry_phase_analysis_tool(
         theta: float = 0.6,
@@ -2832,6 +2981,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Returns a structured report with transmission coefficients, norm/energy conservation, "
         "and non-classicality witness.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a complete tunneling analysis from a short intent",
+            "the caller wants scattering, WKB, propagation, and Wigner diagnostics chained automatically",
+        ),
     )
     def tunneling_experiment_tool(
         barrier_height: float = 50.0,
@@ -3865,6 +4018,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Return the MCP server's connection details, hostname, local IP, "
         "library version, and scratch directory path. Use this to verify "
         "which server you are connected to.",
+        intent_phrases=(
+            "the caller needs to verify which MCP server instance is connected",
+            "the user wants authoritative endpoint, scratch-directory, or bind-host facts",
+        ),
     )
     def server_info_tool() -> dict[str, Any]:
         import socket

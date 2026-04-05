@@ -69,9 +69,14 @@ from spectral_packet_engine.ml import (
 from spectral_packet_engine.mcp_runtime import MCPRuntimeReport, inspect_mcp_runtime
 from spectral_packet_engine.observables import total_probability
 from spectral_packet_engine.parametric_potentials import (
+    ArtifactField,
+    Citation,
+    DifferentiabilityInfo,
+    ParameterPrior,
     available_potential_families,
     default_parameter_mapping,
     describe_potential_families,
+    families_for_workflow,
 )
 from spectral_packet_engine.product import (
     DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,

@@ -12,11 +12,15 @@ from spectral_packet_engine.domain import InfiniteWell1D
 from spectral_packet_engine.dynamics import SpectralPropagator
 from spectral_packet_engine.eigensolver import solve_eigenproblem
 from spectral_packet_engine.uq import (
+    HessianDiagnostics,
+    LaplaceEvidence,
     ObservationInformationSummary,
     ObservationPosteriorSummary,
     ParameterPosteriorSummary,
     PosteriorConfig,
     SensitivityMapSummary,
+    compute_hessian_diagnostics,
+    compute_laplace_evidence,
     flatten_real_view,
     softplus_inverse,
     summarize_observation_information,
@@ -62,6 +66,8 @@ class PotentialCalibrationSummary:
     assumptions: tuple[str, ...]
     observation_posterior: ObservationPosteriorSummary | None = None
     observation_information: ObservationInformationSummary | None = None
+    hessian_diagnostics: HessianDiagnostics | None = None
+    laplace_evidence: LaplaceEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +238,29 @@ def _solve_family_spectrum(
     return result.eigenvalues
 
 
+def _calibration_assumptions(
+    hessian_diag: HessianDiagnostics | None,
+    laplace_ev: LaplaceEvidence | None,
+) -> tuple[str, ...]:
+    base = [
+        "The target data are matched by differentiating through the bounded-domain spectral eigensolver.",
+        "Posterior uncertainty is a local Laplace approximation around the calibrated parameter vector, not a global Bayesian posterior over model families.",
+    ]
+    if hessian_diag is not None:
+        if hessian_diag.gauss_newton_adequate:
+            base.append("Full Hessian analysis confirms the Gauss-Newton approximation is adequate at this parameter point.")
+        else:
+            base.append(
+                f"Full Hessian eigenvalue ratio ({hessian_diag.max_eigenvalue_ratio:.2f}) exceeds the "
+                f"adequacy threshold ({hessian_diag.adequacy_threshold:.1f}); the local Gaussian posterior may be unreliable."
+            )
+        if hessian_diag.negative_curvature_detected:
+            base.append("Negative curvature detected in the full Hessian — the calibrated point may not be a local minimum.")
+    if laplace_ev is not None:
+        base.append("Model comparison uses the Laplace approximation to the log marginal likelihood, which naturally penalises complexity via the Occam factor.")
+    return tuple(base)
+
+
 def calibrate_potential_from_spectrum(
     *,
     family: str,
@@ -293,6 +322,8 @@ def calibrate_potential_from_spectrum(
     sensitivity: SensitivityMapSummary | None = None
     observation_posterior: ObservationPosteriorSummary | None = None
     observation_information: ObservationInformationSummary | None = None
+    hessian_diag: HessianDiagnostics | None = None
+    laplace_ev: LaplaceEvidence | None = None
     resolved_posterior = posterior_config
     if resolved_posterior is not None and resolved_posterior.enabled:
         differentiable_vector = parameter_vector.detach().clone().requires_grad_(True)
@@ -335,6 +366,23 @@ def calibrate_potential_from_spectrum(
                 observation_jacobian=observation_jacobian,
                 noise_scale=parameter_posterior.noise_scale,
             )
+        if resolved_posterior.compute_hessian_diagnostics:
+            def _scalar_loss(v: Tensor) -> Tensor:
+                pred = _solve_family_spectrum(family_def, domain, v, num_points=num_points, num_states=int(target.shape[0]))
+                return torch.mean((pred - target.detach()) ** 2)
+            hessian_diag = compute_hessian_diagnostics(
+                loss_fn=_scalar_loss,
+                parameter_vector=differentiable_vector,
+                gauss_newton_eigenvalues=parameter_posterior.information_eigenvalues,
+                adequacy_threshold=resolved_posterior.hessian_adequacy_threshold,
+            )
+        if resolved_posterior.compute_laplace_evidence and parameter_posterior.precision_matrix is not None:
+            laplace_ev = compute_laplace_evidence(
+                residual_vector=residual_vector,
+                noise_scale=parameter_posterior.noise_scale,
+                precision_matrix=parameter_posterior.precision_matrix,
+                num_parameters=len(family_def.parameter_names),
+            )
 
     return PotentialCalibrationSummary(
         family=family_def.name,
@@ -350,12 +398,11 @@ def calibrate_potential_from_spectrum(
         history=history,
         parameter_posterior=parameter_posterior,
         sensitivity=sensitivity,
-        assumptions=(
-            "The target data are matched by differentiating through the bounded-domain spectral eigensolver.",
-            "Posterior uncertainty is a local Laplace approximation around the calibrated parameter vector, not a global Bayesian posterior over model families.",
-        ),
+        assumptions=_calibration_assumptions(hessian_diag, laplace_ev),
         observation_posterior=observation_posterior,
         observation_information=observation_information,
+        hessian_diagnostics=hessian_diag,
+        laplace_evidence=laplace_ev,
     )
 
 
