@@ -41,9 +41,23 @@ from spectral_packet_engine.diagnostics import (
 )
 from spectral_packet_engine.domain import InfiniteWell1D, coerce_tensor
 from spectral_packet_engine.dynamics import SpectralPropagator
+from spectral_packet_engine.differentiable_physics import (
+    ControlObjective,
+    GradientOptimizationConfig,
+    ObservableGradientSummary,
+    PacketControlOptimizationSummary,
+    PotentialCalibrationSummary,
+    TransitionDesignSummary,
+    calibrate_potential_from_spectrum,
+    compute_packet_observable_gradient,
+    design_potential_for_target_transition,
+    optimize_packet_control,
+)
 from spectral_packet_engine.inference import (
     EstimationConfig,
     GaussianPacketEstimator,
+    PhysicalInferenceSummary,
+    PosteriorConfig,
 )
 from spectral_packet_engine.ml import (
     MLBackendReport,
@@ -54,6 +68,11 @@ from spectral_packet_engine.ml import (
 )
 from spectral_packet_engine.mcp_runtime import MCPRuntimeReport, inspect_mcp_runtime
 from spectral_packet_engine.observables import total_probability
+from spectral_packet_engine.parametric_potentials import (
+    available_potential_families,
+    default_parameter_mapping,
+    describe_potential_families,
+)
 from spectral_packet_engine.product import (
     DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
     DEFAULT_PROFILE_REPORT_CAPTURE_THRESHOLDS,
@@ -69,6 +88,16 @@ from spectral_packet_engine.profiles import (
     summarize_profile_compression,
 )
 from spectral_packet_engine.projector import ProjectionConfig, StateProjector
+from spectral_packet_engine.reduced_models import (
+    CoupledChannelSurfaceSummary,
+    LowRankFactorizationSummary,
+    RadialReductionSummary,
+    SeparableSpectrumSummary,
+    analyze_coupled_channel_surfaces,
+    analyze_separable_tensor_product_spectrum,
+    low_rank_factorize_matrix,
+    solve_radial_reduction,
+)
 from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime
 from spectral_packet_engine.service_runtime import APIStackRuntime, inspect_api_stack
 from spectral_packet_engine.simulation import simulate
@@ -113,6 +142,19 @@ from spectral_packet_engine.tf_surrogate import (
     TensorFlowRegressorConfig,
     inspect_tensorflow_host,
     tensorflow_is_available,
+)
+from spectral_packet_engine.vertical_workflows import (
+    ControlWorkflowSummary,
+    PotentialFamilyCandidateSummary,
+    PotentialFamilyInferenceSummary,
+    ProfileInferenceWorkflowSummary,
+    SpectroscopyWorkflowSummary,
+    TransportResonanceWorkflowSummary,
+    infer_potential_family_from_spectrum,
+    run_control_workflow,
+    run_profile_inference_workflow,
+    run_spectroscopy_workflow,
+    run_transport_resonance_workflow,
 )
 
 Tensor = torch.Tensor
@@ -513,6 +555,7 @@ class InverseFitSummary:
     final_loss: float
     history: tuple[float, ...]
     predicted_density: Tensor
+    physical_inference: PhysicalInferenceSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,6 +651,7 @@ def fit_gaussian_packet_to_density(
     quadrature_points: int = 2048,
     device: str | torch.device | None = "auto",
     estimation_config: EstimationConfig | None = None,
+    posterior_config: PosteriorConfig | None = None,
     steps: int | None = None,
     learning_rate: float | None = None,
 ) -> InverseFitSummary:
@@ -640,6 +684,19 @@ def fit_gaussian_packet_to_density(
         times=evaluation_times,
         observation_mode="density",
     )
+    resolved_posterior_config = posterior_config or PosteriorConfig()
+    physical_inference = (
+        estimator.infer(
+            result.parameters,
+            observation_grid=grid,
+            times=evaluation_times,
+            target=target_density,
+            observation_mode="density",
+            posterior_config=resolved_posterior_config,
+        )
+        if resolved_posterior_config.enabled
+        else None
+    )
     return InverseFitSummary(
         runtime=context.runtime,
         observation_grid=grid,
@@ -648,6 +705,7 @@ def fit_gaussian_packet_to_density(
         final_loss=result.final_loss,
         history=result.history,
         predicted_density=prediction,
+        physical_inference=physical_inference,
     )
 
 
@@ -659,6 +717,7 @@ def fit_gaussian_packet_to_profile_table(
     quadrature_points: int = 2048,
     device: str | torch.device | None = "auto",
     estimation_config: EstimationConfig | None = None,
+    posterior_config: PosteriorConfig | None = None,
     steps: int | None = None,
     learning_rate: float | None = None,
 ) -> InverseFitSummary:
@@ -673,6 +732,7 @@ def fit_gaussian_packet_to_profile_table(
         quadrature_points=quadrature_points,
         device=runtime.device,
         estimation_config=estimation_config,
+        posterior_config=posterior_config,
         steps=steps,
         learning_rate=learning_rate,
     )
@@ -692,6 +752,7 @@ def fit_gaussian_packet_to_profile_table_from_database_query(
     quadrature_points: int = 2048,
     device: str | torch.device | None = "auto",
     estimation_config: EstimationConfig | None = None,
+    posterior_config: PosteriorConfig | None = None,
     steps: int | None = None,
     learning_rate: float | None = None,
     create_if_missing: bool = False,
@@ -706,6 +767,7 @@ def fit_gaussian_packet_to_profile_table_from_database_query(
             quadrature_points=quadrature_points,
             device=device,
             estimation_config=estimation_config,
+            posterior_config=posterior_config,
             steps=steps,
             learning_rate=learning_rate,
         ),
@@ -2565,6 +2627,9 @@ def simulate_packet_sweep(
 
 __all__ = [
     "CaptureModeBudget",
+    "ControlObjective",
+    "ControlWorkflowSummary",
+    "CoupledChannelSurfaceSummary",
     "DatabaseExecutionSummary",
     "DatabaseInspectionSummary",
     "DatabaseProfileTableMaterialization",
@@ -2574,37 +2639,57 @@ __all__ = [
     "EnvironmentReport",
     "FeatureTableExportSummary",
     "ForwardSimulationSummary",
+    "GradientOptimizationConfig",
     "InverseFitSummary",
     "InstallationValidation",
+    "LowRankFactorizationSummary",
     "ModalEvaluationSummary",
     "ModalTrainingSummary",
+    "ObservableGradientSummary",
     "PacketProjectionSummary",
+    "PacketControlOptimizationSummary",
     "PacketSweepItemSummary",
     "PacketSweepSummary",
+    "PotentialCalibrationSummary",
+    "PotentialFamilyCandidateSummary",
+    "PotentialFamilyInferenceSummary",
     "ProfileTableComparisonWorkflowResult",
     "ProfileTableReport",
     "ProfileTableReportOverview",
     "ProfileCompressionWorkflowResult",
     "ProfileCompressionSweepSummary",
+    "ProfileInferenceWorkflowSummary",
     "ProfileTableSpectralSummary",
     "ProfileTableSummary",
+    "RadialReductionSummary",
+    "SeparableSpectrumSummary",
+    "SpectroscopyWorkflowSummary",
     "TabularDatasetSummary",
     "TensorFlowEvaluationSummary",
     "TensorFlowTrainingSummary",
+    "TransitionDesignSummary",
+    "TransportResonanceWorkflowSummary",
     "TransportBenchmarkSummary",
     "analyze_profile_table_spectra",
     "analyze_profile_table_from_database_query",
+    "analyze_coupled_channel_surfaces",
+    "analyze_separable_tensor_product_spectrum",
     "benchmark_transport_scan",
     "build_profile_table_report",
     "build_profile_table_report_from_database_query",
     "bootstrap_local_database",
+    "calibrate_potential_from_spectrum",
     "coerce_database_table_types",
     "build_engine",
     "compare_profile_tables",
+    "compute_packet_observable_gradient",
     "compress_profile_table",
     "compress_profile_table_from_database_query",
     "database_profile_query_artifact_metadata",
     "database_query_artifact_metadata",
+    "default_parameter_mapping",
+    "describe_potential_families",
+    "design_potential_for_target_transition",
     "describe_database_table",
     "execute_database_script",
     "execute_database_statement",
@@ -2617,6 +2702,8 @@ __all__ = [
     "fit_gaussian_packet_to_density",
     "fit_gaussian_packet_to_profile_table",
     "fit_gaussian_packet_to_profile_table_from_database_query",
+    "available_potential_families",
+    "infer_potential_family_from_spectrum",
     "inspect_database",
     "inspect_environment",
     "interpolate_database_time_series",
@@ -2630,10 +2717,17 @@ __all__ = [
     "materialize_database_query",
     "materialize_profile_table_from_database_query",
     "materialize_database_query_to_table",
+    "low_rank_factorize_matrix",
+    "optimize_packet_control",
     "pivot_database_table",
     "project_gaussian_packet",
+    "run_control_workflow",
+    "run_profile_inference_workflow",
+    "run_spectroscopy_workflow",
+    "run_transport_resonance_workflow",
     "simulate_gaussian_packet",
     "simulate_packet_sweep",
+    "solve_radial_reduction",
     "summarize_database_query_result",
     "summarize_profile_table",
     "summarize_tabular_dataset",
