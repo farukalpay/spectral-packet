@@ -6,6 +6,7 @@ import torch
 from spectral_packet_engine import (
     analyze_coupled_channel_surfaces,
     analyze_separable_tensor_product_spectrum,
+    analyze_structured_coupling,
     build_separable_2d_report,
     solve_radial_reduction,
 )
@@ -61,6 +62,31 @@ def test_separable_2d_report_matches_closed_form_box_reference() -> None:
         atol=1e-10,
         rtol=1e-10,
     )
+
+
+def test_structured_coupling_reports_low_rank_and_block_structure_without_generic_solver() -> None:
+    coupling = torch.zeros(6, 6, dtype=torch.float64)
+    coupling[:3, :3] = torch.eye(3)
+    coupling[3:, 3:] = 0.5 * torch.eye(3)
+    coupling[0, 3] = 0.05
+    coupling[3, 0] = 0.05
+
+    summary = analyze_structured_coupling(
+        coupling,
+        tensor_shape=(2, 3),
+        block_partitions=((0, 1, 2), (3, 4, 5)),
+        capture_fraction=0.95,
+    )
+
+    assert summary.tensor_shape == (2, 3)
+    assert summary.matrix_shape == (6, 6)
+    assert summary.low_rank_rank > 0
+    assert summary.low_rank_energy_capture >= 0.95
+    assert summary.block_count == 2
+    assert summary.within_block_energy_fraction is not None
+    assert summary.within_block_energy_fraction > 0.99
+    assert summary.off_block_energy_fraction is not None
+    assert summary.additive_diagonal_score is not None
 
 
 def test_coupled_channel_surface_summary_exposes_gap_and_derivative_couplings() -> None:

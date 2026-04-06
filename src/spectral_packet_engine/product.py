@@ -234,6 +234,15 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
         ),
     ),
     WorkflowIdentity(
+        workflow_id="official-benchmark-registry",
+        label="Official Benchmark Registry",
+        summary="Run the official deterministic benchmark suite and report error, timing, memory, mode budget, identifiability, and backend comparison evidence.",
+        surfaces=WorkflowSurfaceBindings(
+            python="run_benchmark_registry(...)",
+        ),
+        artifact_story="Writes benchmark_registry.json, benchmark_cases.csv, and artifacts.json through the shared artifact layer.",
+    ),
+    WorkflowIdentity(
         workflow_id="inspect-service-status",
         label="Inspect Service Status",
         summary="Inspect shared uptime, task counters, and recent execution history for machine-facing surfaces.",

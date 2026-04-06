@@ -2,6 +2,16 @@ from __future__ import annotations
 
 """Core bounded-domain spectral engine surface."""
 
+from spectral_packet_engine.benchmark_registry import (
+    BenchmarkCaseDefinition,
+    BenchmarkCaseMetrics,
+    BenchmarkCaseResult,
+    BenchmarkRegistryReport,
+    list_official_benchmarks,
+    official_benchmark_registry,
+    run_benchmark_case,
+    run_benchmark_registry,
+)
 from spectral_packet_engine.basis import InfiniteWellBasis, eigenenergy, eigenenergies, sine_basis_matrix
 from spectral_packet_engine.diagnostics import (
     ProfileComparisonSummary,
@@ -34,6 +44,29 @@ from spectral_packet_engine.observables import (
     total_probability,
     variance_position,
 )
+from spectral_packet_engine.open_systems import (
+    InstrumentResponse,
+    LindbladOperator,
+    MeasurementNoiseModel,
+    MeasurementResponseSummary,
+    OpenSystemEvolutionSummary,
+    apply_instrument_response,
+    dephasing_lindblad_operator,
+    evolve_lindblad,
+    finite_resolution_response_matrix,
+    lindblad_rhs,
+    relaxation_lindblad_operator,
+)
+from spectral_packet_engine.physics_contracts import (
+    BasisSpec,
+    BoundaryCondition,
+    HamiltonianOperator,
+    MeasurementModel,
+    ObservableSet,
+    ObservableSpec,
+    PotentialFamily,
+    build_hamiltonian_operator,
+)
 from spectral_packet_engine.profiles import (
     ProfileCompressionResult,
     ProfileCompressionSummary,
@@ -50,8 +83,17 @@ from spectral_packet_engine.profiles import (
     summarize_profile_compression,
 )
 from spectral_packet_engine.projector import ProjectionConfig, StateProjector
+from spectral_packet_engine.reduced_models import CouplingStructureSummary, analyze_structured_coupling
 from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime, resolve_torch_device
 from spectral_packet_engine.simulation import SimulationRecord, simulate
+from spectral_packet_engine.spectral_dataset import (
+    ArtifactLineage,
+    SpectralDataset,
+    SpectralDatasetSplit,
+    SpectralGridMetadata,
+    SpectralUncertainty,
+    spectral_dataset_from_profile_table,
+)
 from spectral_packet_engine.state import (
     GaussianPacketParameters,
     PacketState,
@@ -121,9 +163,17 @@ from spectral_packet_engine.workflows import (
 
 __all__ = [
     "EngineContext",
+    "ArtifactLineage",
+    "BasisSpec",
+    "BenchmarkCaseDefinition",
+    "BenchmarkCaseMetrics",
+    "BenchmarkCaseResult",
+    "BenchmarkRegistryReport",
+    "BoundaryCondition",
     "CoefficientPosteriorSummary",
     "ControlObjective",
     "ControlWorkflowSummary",
+    "CouplingStructureSummary",
     "EstimationConfig",
     "ForwardSimulationSummary",
     "GaussianPacketEstimator",
@@ -132,12 +182,21 @@ __all__ = [
     "InfiniteWell1D",
     "InfiniteWellBasis",
     "InfiniteWellDomain",
+    "HamiltonianOperator",
+    "InstrumentResponse",
     "InverseFitSummary",
+    "LindbladOperator",
     "LowRankFactorizationSummary",
+    "MeasurementModel",
+    "MeasurementNoiseModel",
+    "MeasurementResponseSummary",
     "ObservationMode",
     "ObservationInformationSummary",
     "ObservationPosteriorSummary",
     "ObservableGradientSummary",
+    "ObservableSet",
+    "ObservableSpec",
+    "OpenSystemEvolutionSummary",
     "ParameterPosteriorSummary",
     "PacketProjectionSummary",
     "PacketControlOptimizationSummary",
@@ -147,6 +206,7 @@ __all__ = [
     "PhysicalInferenceSummary",
     "PosteriorConfig",
     "PotentialCalibrationSummary",
+    "PotentialFamily",
     "PotentialFamilyCandidateSummary",
     "PotentialFamilyInferenceSummary",
     "ProfileComparisonSummary",
@@ -167,12 +227,17 @@ __all__ = [
     "SensitivityMapSummary",
     "SpectroscopyWorkflowSummary",
     "SpectralBatchSummary",
+    "SpectralDataset",
+    "SpectralDatasetSplit",
+    "SpectralGridMetadata",
     "SpectralPropagator",
     "SpectralState",
     "SpectralTruncationSummary",
+    "SpectralUncertainty",
     "StateProjector",
     "TorchRuntime",
     "build_engine",
+    "build_hamiltonian_operator",
     "calibrate_potential_from_spectrum",
     "compare_profile_tables",
     "compress_profile_table",
@@ -188,6 +253,7 @@ __all__ = [
     "infer_potential_family_from_spectrum",
     "inspect_torch_runtime",
     "interval_probability",
+    "list_official_benchmarks",
     "l2_norm",
     "low_rank_factorize_matrix",
     "make_packet_state",
@@ -205,7 +271,10 @@ __all__ = [
     "reconstruct_profiles_from_basis",
     "relative_l2_error",
     "resolve_torch_device",
+    "official_benchmark_registry",
     "run_control_workflow",
+    "run_benchmark_case",
+    "run_benchmark_registry",
     "run_profile_inference_workflow",
     "run_spectroscopy_workflow",
     "run_transport_resonance_workflow",
@@ -216,6 +285,14 @@ __all__ = [
     "sine_basis_matrix",
     "analyze_coupled_channel_surfaces",
     "analyze_separable_tensor_product_spectrum",
+    "analyze_structured_coupling",
+    "apply_instrument_response",
+    "dephasing_lindblad_operator",
+    "evolve_lindblad",
+    "finite_resolution_response_matrix",
+    "lindblad_rhs",
+    "relaxation_lindblad_operator",
+    "spectral_dataset_from_profile_table",
     "spectral_tail_mass",
     "spectral_weights",
     "summarize_profile_comparison",

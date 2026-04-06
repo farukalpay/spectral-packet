@@ -1,9 +1,13 @@
 """Public package interface for the spectral packet engine."""
 
+from . import benchmark_registry as benchmark_registry
 from . import core as core
 from . import data as data
 from . import interfaces as interfaces
+from . import open_systems as open_systems
+from . import physics_contracts as physics_contracts
 from . import product as product
+from . import spectral_dataset as spectral_dataset
 from . import surrogates as surrogates
 from . import tree_models as tree_models
 from spectral_packet_engine.version import __version__
@@ -53,6 +57,26 @@ from spectral_packet_engine.config import (
     generate_mcp_client_config,
     load_config,
 )
+from spectral_packet_engine.physics_contracts import (
+    BasisSpec,
+    BoundaryCondition,
+    HamiltonianOperator,
+    MeasurementModel,
+    ObservableSet,
+    ObservableSpec,
+    PotentialFamily,
+    build_hamiltonian_operator,
+)
+from spectral_packet_engine.benchmark_registry import (
+    BenchmarkCaseDefinition,
+    BenchmarkCaseMetrics,
+    BenchmarkCaseResult,
+    BenchmarkRegistryReport,
+    list_official_benchmarks,
+    official_benchmark_registry,
+    run_benchmark_case,
+    run_benchmark_registry,
+)
 from spectral_packet_engine.spectral_diff import (
     kinetic_energy_spectral,
     parseval_conservation_error,
@@ -92,6 +116,19 @@ from spectral_packet_engine.density_matrix import (
     thermal_density_matrix,
     trace_distance,
     von_neumann_entropy,
+)
+from spectral_packet_engine.open_systems import (
+    InstrumentResponse,
+    LindbladOperator,
+    MeasurementNoiseModel,
+    MeasurementResponseSummary,
+    OpenSystemEvolutionSummary,
+    apply_instrument_response,
+    dephasing_lindblad_operator,
+    evolve_lindblad,
+    finite_resolution_response_matrix,
+    lindblad_rhs,
+    relaxation_lindblad_operator,
 )
 from spectral_packet_engine.greens_function import (
     GreensResult,
@@ -234,6 +271,7 @@ from spectral_packet_engine.artifacts import (
     profile_table_from_tensors,
     read_artifact_index,
     to_serializable,
+    write_benchmark_registry_artifacts,
     write_compression_artifacts,
     write_compression_sweep_artifacts,
     write_feature_table_artifacts,
@@ -248,6 +286,7 @@ from spectral_packet_engine.artifacts import (
     write_profile_table_report_artifacts,
     write_reduced_model_artifacts,
     write_rows_csv,
+    write_spectral_dataset_artifacts,
     write_spectral_analysis_artifacts,
     write_tree_training_artifacts,
     write_tree_tuning_artifacts,
@@ -407,9 +446,11 @@ from spectral_packet_engine.release_gate import (
 )
 from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime, resolve_torch_device
 from spectral_packet_engine.reduced_models import (
+    CouplingStructureSummary,
     Separable2DReport,
     Separable2DReportOverview,
     StructuredOperatorSummary,
+    analyze_structured_coupling,
     build_separable_2d_report,
 )
 from spectral_packet_engine.service_runtime import APIStackRuntime, inspect_api_stack
@@ -420,6 +461,14 @@ from spectral_packet_engine.service_status import (
     inspect_service_status,
 )
 from spectral_packet_engine.simulation import SimulationRecord, simulate
+from spectral_packet_engine.spectral_dataset import (
+    ArtifactLineage,
+    SpectralDataset,
+    SpectralDatasetSplit,
+    SpectralGridMetadata,
+    SpectralUncertainty,
+    spectral_dataset_from_profile_table,
+)
 from spectral_packet_engine.synthetic_profiles import generate_synthetic_profile_table
 from spectral_packet_engine.state import (
     GaussianPacketParameters,
@@ -663,10 +712,14 @@ __all__ = list(
     dict.fromkeys(
         [
             "__version__",
+            "benchmark_registry",
             "core",
             "data",
             "interfaces",
+            "open_systems",
+            "physics_contracts",
             "product",
+            "spectral_dataset",
             "surrogates",
             "tree_models",
             "DatabaseCapabilityReport",
@@ -681,6 +734,7 @@ __all__ = list(
             "ControlObjective",
             "ControlWorkflowSummary",
             "CoupledChannelSurfaceSummary",
+            "CouplingStructureSummary",
             "DEFAULT_FEATURE_EXPORT_FORMAT",
             "DEFAULT_FEATURE_EXPORT_NUM_MODES",
             "DEFAULT_FEATURE_EXPORT_OUTPUT_DIR",
@@ -706,9 +760,16 @@ __all__ = list(
             "DEFAULT_TREE_MODEL_TEST_FRACTION",
             "DEFAULT_TREE_TUNE_OUTPUT_DIR",
             "DensityPreprocessingConfig",
+            "ArtifactLineage",
             "EngineContext",
             "EnvironmentReport",
             "EstimationConfig",
+            "BasisSpec",
+            "BenchmarkCaseDefinition",
+            "BenchmarkCaseMetrics",
+            "BenchmarkCaseResult",
+            "BenchmarkRegistryReport",
+            "BoundaryCondition",
             "GradientOptimizationConfig",
             "FeatureImportanceEntry",
             "FeatureTableExportSummary",
@@ -718,6 +779,8 @@ __all__ = list(
             "InfiniteWell1D",
             "InfiniteWellBasis",
             "InfiniteWellDomain",
+            "HamiltonianOperator",
+            "InstrumentResponse",
             "InverseFitSummary",
             "InstallationValidation",
             "KroneckerSumOperator2D",
@@ -733,13 +796,19 @@ __all__ = list(
             "ModalRegressionResult",
             "ModalSurrogateConfig",
             "ModalTrainingSummary",
+            "MeasurementModel",
+            "MeasurementNoiseModel",
+            "MeasurementResponseSummary",
             "ObservableGradientSummary",
+            "ObservableSet",
+            "ObservableSpec",
             "HessianDiagnostics",
             "IdentifiabilityAtlas",
             "LaplaceEvidence",
             "ObservationInformationSummary",
             "ObservationMode",
             "ObservationPosteriorSummary",
+            "OpenSystemEvolutionSummary",
             "CoefficientPosteriorSummary",
             "ParameterPosteriorSummary",
             "build_identifiability_atlas",
@@ -753,6 +822,7 @@ __all__ = list(
             "PhysicalInferenceSummary",
             "PosteriorConfig",
             "PotentialCalibrationSummary",
+            "PotentialFamily",
             "PotentialFamilyCandidateSummary",
             "PotentialFamilyInferenceSummary",
             "PRODUCT_NAME",
@@ -789,9 +859,13 @@ __all__ = list(
             "Separable2DReport",
             "Separable2DReportOverview",
             "SpectralBatchSummary",
+            "SpectralDataset",
+            "SpectralDatasetSplit",
+            "SpectralGridMetadata",
             "SpectralPropagator",
             "SpectralState",
             "SpectralTruncationSummary",
+            "SpectralUncertainty",
             "SpectroscopyWorkflowSummary",
             "StateProjector",
             "TensorFlowHostPlatform",
@@ -849,6 +923,8 @@ __all__ = list(
             "analyze_profile_table_spectra",
             "analyze_profile_table_from_database_query",
             "analyze_separable_tensor_product_spectrum",
+            "analyze_structured_coupling",
+            "apply_instrument_response",
             "available_quantum_gas_transport_scans",
             "benchmark_transport_scan",
             "build_profile_table_report",
@@ -856,6 +932,7 @@ __all__ = list(
             "build_separable_2d_report",
             "bootstrap_local_database",
             "build_engine",
+            "build_hamiltonian_operator",
             "calibrate_potential_from_spectrum",
             "compare_profile_tables",
             "compress_profile_table",
@@ -874,12 +951,14 @@ __all__ = list(
             "DifferentiabilityInfo",
             "ParameterPrior",
             "default_parameter_mapping",
+            "dephasing_lindblad_operator",
             "describe_database_table",
             "families_for_workflow",
             "describe_potential_families",
             "database_profile_query_artifact_metadata",
             "database_query_artifact_metadata",
             "design_potential_for_target_transition",
+            "evolve_lindblad",
             "execute_database_script",
             "execute_database_statement",
             "eigenenergy",
@@ -897,6 +976,7 @@ __all__ = list(
             "fit_gaussian_packet_to_density",
             "fit_gaussian_packet_to_profile_table",
             "fit_gaussian_packet_to_profile_table_from_database_query",
+            "finite_resolution_response_matrix",
             "available_potential_families",
             "grid_probability_density",
             "guide_workflow",
@@ -927,6 +1007,8 @@ __all__ = list(
             "killer_workflow_catalog",
             "l2_norm",
             "load_and_compress_profile_table",
+            "list_official_benchmarks",
+            "lindblad_rhs",
             "load_profile_table_report",
             "load_tabular_dataset",
             "load_tabular_dataset_csv",
@@ -956,6 +1038,7 @@ __all__ = list(
             "modal_tail",
             "normalize_profiles",
             "optimize_packet_control",
+            "official_benchmark_registry",
             "opinionated_defaults",
             "parquet_support_is_available",
             "phase_factors",
@@ -974,7 +1057,10 @@ __all__ = list(
             "read_artifact_index",
             "reconstruct_profiles_from_basis",
             "relative_l2_error",
+            "relaxation_lindblad_operator",
             "run_release_gate",
+            "run_benchmark_case",
+            "run_benchmark_registry",
             "run_control_workflow",
             "run_profile_inference_workflow",
             "run_spectroscopy_workflow",
@@ -1000,6 +1086,7 @@ __all__ = list(
             "simulate_gaussian_packet",
             "simulate_packet_sweep",
             "solve_radial_reduction",
+            "spectral_dataset_from_profile_table",
             "summarize_database_query_result",
             "sine_basis_matrix",
             "spectral_tail_mass",
@@ -1030,6 +1117,7 @@ __all__ = list(
             "variance_position",
             "workflow_catalog",
             "write_tabular_artifacts",
+            "write_benchmark_registry_artifacts",
             "write_tabular_dataset_to_database",
             "write_compression_artifacts",
             "write_compression_sweep_artifacts",
@@ -1045,6 +1133,7 @@ __all__ = list(
             "write_profile_table_report_artifacts",
             "write_reduced_model_artifacts",
             "write_rows_csv",
+            "write_spectral_dataset_artifacts",
             "write_spectral_analysis_artifacts",
             "write_tree_training_artifacts",
             "write_tree_tuning_artifacts",
@@ -1226,6 +1315,11 @@ __all__ = list(
             "EntanglementResult",
             "MutualInformationResult",
             "QuantumChannelResult",
+            "InstrumentResponse",
+            "LindbladOperator",
+            "MeasurementNoiseModel",
+            "MeasurementResponseSummary",
+            "OpenSystemEvolutionSummary",
             "quantum_fisher_information",
             "entanglement_entropy",
             "concurrence",
@@ -1236,6 +1330,12 @@ __all__ = list(
             "apply_quantum_channel",
             "depolarizing_channel",
             "amplitude_damping_channel",
+            "apply_instrument_response",
+            "dephasing_lindblad_operator",
+            "evolve_lindblad",
+            "finite_resolution_response_matrix",
+            "lindblad_rhs",
+            "relaxation_lindblad_operator",
             # --- Perturbative coupling ---
             "FanoProfile",
             "LandauZenerResult",

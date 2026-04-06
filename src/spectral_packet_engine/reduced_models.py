@@ -52,6 +52,23 @@ class LowRankFactorizationSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class CouplingStructureSummary:
+    tensor_shape: tuple[int, int]
+    matrix_shape: tuple[int, int]
+    total_mode_count: int
+    frobenius_norm: float
+    diagonal_energy_fraction: float
+    additive_diagonal_score: float | None
+    low_rank_rank: int
+    low_rank_energy_capture: float
+    low_rank_relative_error: float
+    block_count: int
+    within_block_energy_fraction: float | None
+    off_block_energy_fraction: float | None
+    assumptions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class StructuredOperatorSummary:
     kind: str
     tensor_shape: tuple[int, int]
@@ -179,6 +196,140 @@ def low_rank_factorize_matrix(
         reconstruction_error=float(torch.linalg.norm(residual).item() / max(float(torch.linalg.norm(values).item()), 1e-12)),
         left_factors=U[:, :retained_rank].detach(),
         right_factors=Vh[:retained_rank, :].detach(),
+    )
+
+
+def _coerce_coupling_matrix(coupling, *, tensor_shape: tuple[int, int]) -> Tensor:
+    num_x, num_y = tensor_shape
+    if num_x <= 0 or num_y <= 0:
+        raise ValueError("tensor_shape entries must be positive")
+    total = int(num_x * num_y)
+    values = torch.as_tensor(coupling)
+    if values.ndim == 1:
+        if int(values.shape[0]) != total:
+            raise ValueError("one-dimensional coupling must have tensor_shape[0] * tensor_shape[1] entries")
+        values = torch.diag(values)
+    elif values.ndim == 2:
+        if tuple(values.shape) != (total, total):
+            raise ValueError("two-dimensional coupling must have shape (total_modes, total_modes)")
+    elif values.ndim == 4:
+        if tuple(values.shape) != (num_x, num_y, num_x, num_y):
+            raise ValueError("four-dimensional coupling must have shape (x, y, x, y)")
+        values = values.reshape(total, total)
+    else:
+        raise ValueError("coupling must be a vector, matrix, or rank-4 tensor over the tensor-product basis")
+    if not torch.isfinite(values).all().item():
+        raise ValueError("coupling values must be finite")
+    dtype = values.dtype if torch.is_complex(values) else torch.float64
+    return values.to(dtype=dtype)
+
+
+def _low_rank_energy_metrics(matrix: Tensor, capture_fraction: float) -> tuple[int, Tensor, float, float]:
+    if not (0.0 < capture_fraction <= 1.0):
+        raise ValueError("capture_fraction must lie in (0, 1]")
+    singular_values = torch.linalg.svdvals(matrix)
+    squared = torch.real(singular_values * singular_values.conj())
+    total = float(torch.sum(squared).item())
+    if total <= 0.0:
+        return 0, singular_values.detach(), 0.0, 0.0
+    cumulative = torch.cumsum(squared, dim=0) / torch.sum(squared)
+    retained_rank = int(torch.searchsorted(cumulative, torch.tensor(capture_fraction, dtype=cumulative.dtype)).item()) + 1
+    retained_rank = min(max(retained_rank, 1), int(singular_values.numel()))
+    energy_capture = float(torch.sum(squared[:retained_rank]).item() / total)
+    relative_error = float(torch.sqrt(torch.clamp(1.0 - torch.as_tensor(energy_capture), min=0.0)).item())
+    return retained_rank, singular_values.detach(), energy_capture, relative_error
+
+
+def _block_energy_fraction(
+    matrix: Tensor,
+    block_partitions: Sequence[Sequence[int]] | None,
+) -> tuple[int, float | None, float | None]:
+    if block_partitions is None:
+        return 0, None, None
+    total = int(matrix.shape[0])
+    mask = torch.zeros(total, total, dtype=torch.bool, device=matrix.device)
+    seen: set[int] = set()
+    block_count = 0
+    for block in block_partitions:
+        indices = tuple(int(index) for index in block)
+        if not indices:
+            continue
+        if any(index < 0 or index >= total for index in indices):
+            raise ValueError("block_partitions contain an out-of-range index")
+        if seen.intersection(indices):
+            raise ValueError("block_partitions must not overlap")
+        seen.update(indices)
+        index_tensor = torch.as_tensor(indices, dtype=torch.long, device=matrix.device)
+        mask[index_tensor[:, None], index_tensor[None, :]] = True
+        block_count += 1
+    energy = torch.abs(matrix) ** 2
+    total_energy = float(torch.sum(energy).item())
+    if total_energy <= 0.0:
+        return block_count, 0.0, 0.0
+    within = float(torch.sum(energy[mask]).item() / total_energy)
+    return block_count, within, 1.0 - within
+
+
+def _additive_diagonal_score(matrix: Tensor, tensor_shape: tuple[int, int]) -> float | None:
+    diagonal = torch.diagonal(matrix)
+    if torch.is_complex(diagonal):
+        diagonal_values = diagonal.real
+    else:
+        diagonal_values = diagonal
+    surface = diagonal_values.reshape(tensor_shape)
+    denominator = torch.linalg.norm(surface)
+    if float(denominator.item()) <= 0.0:
+        return None
+    row_mean = torch.mean(surface, dim=1, keepdim=True)
+    col_mean = torch.mean(surface, dim=0, keepdim=True)
+    additive = row_mean + col_mean - torch.mean(surface)
+    residual = torch.linalg.norm(surface - additive) / denominator
+    return float(torch.clamp(1.0 - residual, min=0.0, max=1.0).item())
+
+
+def analyze_structured_coupling(
+    coupling,
+    *,
+    tensor_shape: tuple[int, int],
+    block_partitions: Sequence[Sequence[int]] | None = None,
+    capture_fraction: float = 0.99,
+) -> CouplingStructureSummary:
+    """Summarize near-separable, block-coupled, and low-rank structure.
+
+    The function analyzes an explicit coupling over an existing tensor-product
+    basis.  It does not introduce a generic multidimensional mesh or solver.
+    """
+
+    matrix = _coerce_coupling_matrix(coupling, tensor_shape=tensor_shape)
+    total = int(matrix.shape[0])
+    frobenius = torch.linalg.norm(matrix)
+    energy = torch.abs(matrix) ** 2
+    total_energy = float(torch.sum(energy).item())
+    diagonal_energy = float(torch.sum(torch.abs(torch.diagonal(matrix)) ** 2).item())
+    diagonal_energy_fraction = 0.0 if total_energy <= 0.0 else diagonal_energy / total_energy
+    retained_rank, _, low_rank_capture, low_rank_error = _low_rank_energy_metrics(
+        matrix,
+        capture_fraction=capture_fraction,
+    )
+    block_count, within_block, off_block = _block_energy_fraction(matrix, block_partitions)
+    return CouplingStructureSummary(
+        tensor_shape=(int(tensor_shape[0]), int(tensor_shape[1])),
+        matrix_shape=(total, total),
+        total_mode_count=total,
+        frobenius_norm=float(torch.real(frobenius).item()),
+        diagonal_energy_fraction=diagonal_energy_fraction,
+        additive_diagonal_score=_additive_diagonal_score(matrix, tensor_shape),
+        low_rank_rank=retained_rank,
+        low_rank_energy_capture=low_rank_capture,
+        low_rank_relative_error=low_rank_error,
+        block_count=block_count,
+        within_block_energy_fraction=within_block,
+        off_block_energy_fraction=off_block,
+        assumptions=(
+            "The coupling is analyzed over an explicit retained tensor-product basis.",
+            "Low-rank structure is measured by singular-value energy capture, not by a generic multidimensional discretization.",
+            "Block-coupling structure is reported only when explicit block partitions are supplied.",
+        ),
     )
 
 
@@ -618,6 +769,7 @@ def solve_radial_reduction(
 
 __all__ = [
     "CoupledChannelSurfaceSummary",
+    "CouplingStructureSummary",
     "LowRankFactorizationSummary",
     "RadialReductionSummary",
     "Separable2DReport",
@@ -626,6 +778,7 @@ __all__ = [
     "StructuredOperatorSummary",
     "analyze_coupled_channel_surfaces",
     "analyze_separable_tensor_product_spectrum",
+    "analyze_structured_coupling",
     "build_separable_2d_report",
     "low_rank_factorize_matrix",
     "solve_radial_reduction",
