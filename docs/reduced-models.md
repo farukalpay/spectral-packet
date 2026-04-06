@@ -7,6 +7,7 @@ The repository does not claim a general high-dimensional solver.
 It exposes controlled reduced models that preserve explicit physical structure:
 
 - separable tensor-product spectra,
+- near-separable and block-coupled tensor-basis diagnostics,
 - phase-1 structured dimensional lift for separable 2D bounded problems,
 - reduced coupled-channel adiabatic surfaces,
 - radial effective-coordinate reductions,
@@ -32,6 +33,22 @@ report = build_separable_2d_report(
     device="cpu",
 )
 report.write_artifacts("artifacts/separable_2d_report")
+```
+
+```python
+import torch
+
+from spectral_packet_engine import analyze_structured_coupling
+
+coupling = torch.eye(6)
+structure = analyze_structured_coupling(
+    coupling,
+    tensor_shape=(2, 3),
+    block_partitions=((0, 1, 2), (3, 4, 5)),
+)
+
+print(structure.low_rank_energy_capture)
+print(structure.within_block_energy_fraction)
 ```
 
 ```python
@@ -94,6 +111,7 @@ Every reduced-model summary includes explicit assumptions.
 Examples:
 
 - separable workflows state that the total Hamiltonian is assumed to split into independent 1D components and that the structured operator is a retained-basis Kronecker sum,
+- structured coupling diagnostics analyze an explicit retained tensor-product basis and do not create a generic multidimensional solver,
 - the structured-dimensional-lift report states that it is one separable 2D bounded-domain path rather than a general 2D/3D solver,
 - coupled-channel workflows state that they model a reduced avoided crossing rather than a full electronic-structure problem,
 - radial workflows state that they solve a 1D effective-coordinate problem with a centrifugal term on a finite interval.

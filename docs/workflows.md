@@ -2,11 +2,12 @@
 
 These are the workflows that explain the product quickly without broadening what it is.
 
-The repository now has four major workflow families:
+The repository now has five major workflow families:
 
 - report-first spectral evidence loops,
 - inverse and uncertainty-aware inference,
 - controlled reduced models,
+- benchmark and release evidence,
 - differentiable and domain-specific vertical workflows.
 
 If you are unsure which path to use first, ask the product directly:
@@ -313,7 +314,47 @@ spectral-packet-engine analyze-coupled-surfaces --device cpu
 spectral-packet-engine solve-radial-reduction --family morse --params '{"D_e": 8.0, "alpha": 2.0, "x_eq": 0.7}' --device cpu
 ```
 
-## 8. Differentiable Design And Control
+## 8. Official Benchmark Registry
+
+Input:
+
+- an explicit official benchmark case list,
+- or no case list, which runs the full official suite.
+
+Code:
+
+```python
+from spectral_packet_engine import run_benchmark_registry
+
+report = run_benchmark_registry(
+    case_ids=("harmonic-oscillator", "double-well", "barrier-scattering"),
+    device="cpu",
+)
+artifacts = report.write_artifacts("artifacts/benchmark_registry")
+```
+
+Expected outputs:
+
+- one registry report with per-case status and score,
+- per-case error metrics,
+- elapsed time and Python peak memory,
+- explicit mode budget or energy-grid budget,
+- local identifiability evidence,
+- backend metadata and requested backend comparisons.
+
+Artifact locations:
+
+- `artifacts/benchmark_registry/benchmark_registry.json`
+- `artifacts/benchmark_registry/benchmark_cases.csv`
+- `artifacts/benchmark_registry/artifacts.json`
+
+What the user learns:
+
+- benchmark claims are measured through a shared library contract rather than interface-specific scripts,
+- harmonic oscillator, double well, barrier scattering, anharmonic inverse fit, noisy reconstruction, and reduced-model tradeoff share one report shape,
+- backend comparisons are explicit and recorded instead of silently falling back to an unrelated runtime.
+
+## 9. Differentiable Design And Control
 
 Input:
 
@@ -344,7 +385,7 @@ What the user learns:
 - the control story stays tied to explicit packet-preparation parameters,
 - differentiable workflows remain subordinate to the spectral core rather than forming a generic training subsystem.
 
-## 9. Vertical Scientific Workflow
+## 10. Vertical Scientific Workflow
 
 Input:
 
@@ -372,7 +413,7 @@ What the user learns:
 - the tabular vertical is one coherent workflow rather than three disconnected commands,
 - Python, CLI, and MCP all follow the same nested artifact contract.
 
-## 10. CLI Batch Packet Sweep
+## 11. CLI Batch Packet Sweep
 
 Input:
 
@@ -406,7 +447,7 @@ What the user learns:
 - the backend can absorb parameter-sweep work,
 - the project is usable for repeated compute jobs, not only single demos.
 
-## 11. Backend-Aware ML Workflow
+## 12. Backend-Aware ML Workflow
 
 Input:
 
@@ -443,7 +484,7 @@ What the user learns:
 - PyTorch and JAX share one workflow surface,
 - surrogate workloads stay subordinate to the spectral engine instead of becoming a separate product.
 
-## 12. Spectral Feature Export And Tree Models
+## 13. Spectral Feature Export And Tree Models
 
 Status: beta. These workflows are integrated and artifact-backed, but they should still be treated as downstream spectral workflows rather than as a fully generalized tabular ML subsystem.
 
@@ -486,7 +527,7 @@ What the user learns:
 - tree workflows stay tied to spectral inputs and provenance instead of becoming generic tabular tooling,
 - backend availability and optional dependency boundaries are explicit before training starts.
 
-## 13. MCP Workflow
+## 14. MCP Workflow
 
 Input:
 

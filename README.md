@@ -28,6 +28,7 @@ This upgrade extends that core in four focused directions:
 2. Controlled reduced models beyond plain 1D
    - separable tensor-product spectra,
    - phase-1 structured dimensional lift for separable 2D bounded problems,
+   - near-separable, block-coupled, and low-rank coupling diagnostics over retained tensor bases,
    - reduced coupled-channel surfaces,
    - radial effective-coordinate reductions,
    - structured low-rank summaries.
@@ -41,14 +42,23 @@ This upgrade extends that core in four focused directions:
    - control / packet steering,
    - scientific tabular report-first inference workflows.
 
+Two structural contracts keep this direction product-aligned rather than generic:
+
+- `open-system measurement` for Lindblad evolution, finite-resolution instrument response, and inspectable measurement-noise summaries over explicit matrix or grid bases,
+- `SpectralDataset` for grid metadata, units, uncertainty, regime splits, content hashes, and artifact lineage before data enter inverse, reduced, benchmark, or surrogate workflows.
+
 ## Product Shape
 
 The intended product language is:
 
+- `physics contracts` for shared PotentialFamily, HamiltonianOperator, BasisSpec, BoundaryCondition, ObservableSet, and MeasurementModel objects,
 - `profile-table report` for evidence-first diagnostics,
 - `inverse inference` for physical parameters plus uncertainty,
 - `reduced models` when the physics has explicit structure,
+- `open-system measurement` when real data includes decoherence, finite resolution, or measurement noise,
+- `SpectralDataset` when data need grid metadata, units, uncertainty, splits, and artifact lineage,
 - `differentiable design` when gradients are the right tool,
+- `benchmark registry` for evidence-backed release and performance claims,
 - `vertical workflows` when the user cares about spectroscopy, transport, control, or scientific tabular analysis end-to-end.
 
 That same language now appears in:
@@ -148,6 +158,55 @@ report.write_artifacts("artifacts/separable_2d_report")
 print(report.overview.example_name)
 print(report.overview.max_absolute_reference_error)
 ```
+
+### Official benchmark registry
+
+```python
+from spectral_packet_engine import run_benchmark_registry
+
+report = run_benchmark_registry(
+    case_ids=("harmonic-oscillator", "double-well", "barrier-scattering"),
+    device="cpu",
+)
+
+for result in report.case_results:
+    print(result.definition.case_id, result.status, result.metrics.score)
+
+report.write_artifacts("artifacts/benchmark_registry")
+```
+
+Input is an explicit case list or the full official suite. Outputs include per-case error metrics, elapsed time, Python peak memory, mode or energy-grid budget, local identifiability evidence, backend metadata, and requested backend comparisons. The artifact bundle writes `benchmark_registry.json`, `benchmark_cases.csv`, and `artifacts.json`; it tells a user whether the engine’s claims are backed by reproducible measurement rather than a feature list.
+
+### Physics-aware datasets and measurement response
+
+```python
+import torch
+
+from spectral_packet_engine import (
+    MeasurementNoiseModel,
+    finite_resolution_response_matrix,
+    apply_instrument_response,
+    load_profile_table,
+    spectral_dataset_from_profile_table,
+    write_spectral_dataset_artifacts,
+)
+
+profile_table = load_profile_table("examples/data/synthetic_profiles.csv")
+dataset = spectral_dataset_from_profile_table(profile_table)
+write_spectral_dataset_artifacts("artifacts/spectral_dataset", dataset)
+
+response = finite_resolution_response_matrix(dataset.grids[-1].coordinates, sigma=0.04)
+summary = apply_instrument_response(
+    dataset.values[0],
+    response,
+    noise_model=MeasurementNoiseModel(model="independent-gaussian", scale=0.01),
+)
+
+print(dataset.content_hash)
+print(torch.max(summary.normalization_error))
+```
+
+Input is an already-validated `ProfileTable` or explicit spectral-grid tensor. Outputs include grid metadata, units, uncertainty, train/test regime splits, artifact lineage, and a finite-resolution measurement response summary. This is a physics-aware data contract, not a generic dataframe or backend abstraction.
 
 ### Differentiable inverse design
 
@@ -269,6 +328,12 @@ New bundle patterns include:
   - `transition_design_spectrum.csv`
   - `transition_gradient.csv`
   - `optimization_history.csv`
+- benchmark registry:
+  - `benchmark_registry.json`
+  - `benchmark_cases.csv`
+- spectral dataset:
+  - `spectral_dataset.json`
+  - `spectral_dataset_values.json`
 - vertical workflows:
   - nested bundles such as `family_inference/`, `report/`, `inverse/`, `features/`
 
@@ -359,5 +424,7 @@ The repository is explicit about what it does not claim:
 - local posterior approximations are not global Bayesian inference,
 - reduced models are structured reductions, not arbitrary 2D/3D solvers,
 - phase-1 structured dimensional lift is a separable 2D tensor-product path with explicit budgets and truncation, not a generic multidimensional PDE stack,
+- open-system evolution is an explicit matrix-basis Lindblad contract, not a generic environment simulator,
+- `SpectralDataset` is a physics-aware data contract over spectral grids, not a replacement for clean tabular ingestion,
 - differentiable workflows optimize explicit parameterizations, not unrestricted control spaces,
 - vertical workflows are productized orchestrations over the same spectral core, not separate subsystems.

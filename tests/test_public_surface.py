@@ -17,10 +17,17 @@ def test_grouped_public_surfaces_are_exposed() -> None:
     assert spe.tree_models.inspect_tree_backends is spe.inspect_tree_backends
     assert spe.interfaces.create_mcp_server is spe.create_mcp_server
     assert spe.interfaces.inspect_service_status is spe.inspect_service_status
+    assert spe.physics_contracts.HamiltonianOperator is spe.HamiltonianOperator
+    assert spe.benchmark_registry.BenchmarkRegistryReport is spe.BenchmarkRegistryReport
+    assert spe.open_systems.LindbladOperator is spe.LindbladOperator
+    assert spe.spectral_dataset.SpectralDataset is spe.SpectralDataset
+    assert spe.data.SpectralDataset is spe.SpectralDataset
     assert spe.build_profile_table_report is not None
     assert spe.execute_database_script is not None
     assert spe.execute_database_statement is not None
     assert spe.write_feature_table_artifacts is not None
+    assert spe.write_benchmark_registry_artifacts is not None
+    assert spe.write_spectral_dataset_artifacts is not None
     assert spe.train_tree_model is not None
     assert spe.tune_tree_model is not None
     assert spe.build_separable_2d_report is not None
@@ -51,6 +58,7 @@ def test_product_identity_report_exposes_one_shared_workflow_map() -> None:
     assert any(workflow.workflow_id == "analyze-separable-spectrum" for workflow in report.workflows)
     assert any(workflow.workflow_id == "design-transition" for workflow in report.workflows)
     assert any(workflow.workflow_id == "profile-inference-workflow" for workflow in report.workflows)
+    assert any(workflow.workflow_id == "official-benchmark-registry" for workflow in report.workflows)
 
 
 def test_workflow_guide_prefers_report_first_for_file_and_sql_inputs() -> None:
@@ -81,6 +89,19 @@ def test_workflow_guide_is_goal_aware_for_inverse_and_feature_model_loops() -> N
 def test_top_level_all_is_deduplicated() -> None:
     assert len(spe.__all__) == len(set(spe.__all__))
     assert "tree_models" in spe.__all__
+    assert "physics_contracts" in spe.__all__
+    assert "benchmark_registry" in spe.__all__
+    assert "open_systems" in spe.__all__
+    assert "spectral_dataset" in spe.__all__
+    assert "HamiltonianOperator" in spe.__all__
+    assert "MeasurementModel" in spe.__all__
+    assert "LindbladOperator" in spe.__all__
+    assert "SpectralDataset" in spe.__all__
+    assert "analyze_structured_coupling" in spe.__all__
+    assert "BenchmarkRegistryReport" in spe.__all__
+    assert "run_benchmark_registry" in spe.__all__
+    assert "write_benchmark_registry_artifacts" in spe.__all__
+    assert "write_spectral_dataset_artifacts" in spe.__all__
     assert "FeatureTableExportSummary" in spe.__all__
     assert "train_tree_model" in spe.__all__
     assert "tune_tree_model" in spe.__all__
