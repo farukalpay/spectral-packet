@@ -505,6 +505,27 @@ from spectral_packet_engine.tf_surrogate import (
     inspect_tensorflow_host,
     tensorflow_is_available,
 )
+from spectral_packet_engine.perturbative_coupling import (
+    FanoProfile,
+    LandauZenerResult,
+    MultiChannelCouplingResult,
+    analyze_multichannel_coupling,
+    fit_fano_profile,
+    landau_zener_transition,
+)
+from spectral_packet_engine.open_transport import (
+    CAPProfile,
+    CAPPropagationResult,
+    DelayTimeResult,
+    OpenTransportSummary,
+    ResonanceExtractionResult,
+    ResonancePole,
+    analyze_open_transport,
+    build_cap_profile,
+    cap_augmented_propagation,
+    compute_delay_time,
+    extract_resonance_poles,
+)
 from spectral_packet_engine.uq import (
     HessianDiagnostics,
     IdentifiabilityAtlas,
@@ -1215,6 +1236,25 @@ __all__ = list(
             "apply_quantum_channel",
             "depolarizing_channel",
             "amplitude_damping_channel",
+            # --- Perturbative coupling ---
+            "FanoProfile",
+            "LandauZenerResult",
+            "MultiChannelCouplingResult",
+            "analyze_multichannel_coupling",
+            "fit_fano_profile",
+            "landau_zener_transition",
+            # --- Open-boundary transport ---
+            "CAPProfile",
+            "CAPPropagationResult",
+            "DelayTimeResult",
+            "OpenTransportSummary",
+            "ResonanceExtractionResult",
+            "ResonancePole",
+            "analyze_open_transport",
+            "build_cap_profile",
+            "cap_augmented_propagation",
+            "compute_delay_time",
+            "extract_resonance_poles",
         ]
     )
 )
