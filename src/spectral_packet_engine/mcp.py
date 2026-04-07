@@ -161,8 +161,38 @@ def _coerce_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
 @dataclass(frozen=True, slots=True)
 class _HTTPToolMirror:
     tool_name: str
-    path: str
+    paths: tuple[str, ...]
     methods: tuple[str, ...]
+
+
+_HTTP_TOOL_ROUTE_PREFIXES = ("", "/Lightcap")
+
+
+def _normalize_http_tool_prefix(prefix: str) -> str:
+    token = str(prefix).strip()
+    if token in {"", "/"}:
+        return ""
+    return "/" + token.strip("/")
+
+
+def _http_tool_route_prefixes(server) -> tuple[str, ...]:
+    raw_prefixes = getattr(server, "_spectral_http_tool_prefixes", _HTTP_TOOL_ROUTE_PREFIXES)
+    normalized = [_normalize_http_tool_prefix(prefix) for prefix in raw_prefixes]
+    return tuple(dict.fromkeys(normalized))
+
+
+def _default_http_tool_paths(server, tool_name: str) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}/{tool_name}" if prefix else f"/{tool_name}"
+        for prefix in _http_tool_route_prefixes(server)
+    )
+
+
+def _http_tool_registry_paths(server) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}/tool_registry" if prefix else "/tool_registry"
+        for prefix in _http_tool_route_prefixes(server)
+    )
 
 
 def _http_mirror_registry(server) -> dict[str, _HTTPToolMirror]:
@@ -181,12 +211,16 @@ def _register_http_mirror(
     methods: tuple[str, ...] = ("GET", "POST"),
 ) -> None:
     registry = _http_mirror_registry(server)
-    resolved_path = f"/{tool_name}" if path is None else str(path)
-    if not resolved_path.startswith("/"):
-        resolved_path = f"/{resolved_path}"
+    if path is None:
+        resolved_paths = _default_http_tool_paths(server, tool_name)
+    else:
+        resolved_path = str(path)
+        if not resolved_path.startswith("/"):
+            resolved_path = f"/{resolved_path}"
+        resolved_paths = (resolved_path,)
     registry[tool_name] = _HTTPToolMirror(
         tool_name=tool_name,
-        path=resolved_path,
+        paths=resolved_paths,
         methods=tuple(method.upper() for method in methods),
     )
 
@@ -195,11 +229,21 @@ def _http_mirror_manifest(server) -> list[dict[str, Any]]:
     return [
         {
             "tool": mirror.tool_name,
-            "path": mirror.path,
+            "paths": list(mirror.paths),
             "methods": list(mirror.methods),
         }
         for mirror in _http_mirror_registry(server).values()
     ]
+
+
+def _http_tool_meta(server, tool_name: str, methods: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "http_bridge": {
+            "paths": list(_default_http_tool_paths(server, tool_name)),
+            "methods": list(methods),
+            "registry_paths": list(_http_tool_registry_paths(server)),
+        }
+    }
 
 
 def _merge_http_argument(arguments: dict[str, Any], key: str, value: Any) -> None:
@@ -230,6 +274,8 @@ async def _collect_http_tool_arguments(request) -> dict[str, Any]:
         return arguments
     if not isinstance(payload, dict):
         raise ValueError("HTTP tool bridge expects a JSON object body for POST requests.")
+    if isinstance(payload.get("arguments"), dict) and set(payload).issubset({"tool", "name", "arguments"}):
+        payload = payload["arguments"]
     for key, value in payload.items():
         arguments[str(key)] = value
     return arguments
@@ -247,34 +293,38 @@ def _install_http_tool_mirrors(server) -> None:
     from starlette.responses import JSONResponse
 
     for mirror in mirrors:
-        async def _http_mirror_handler(request, *, _mirror: _HTTPToolMirror = mirror):
-            try:
-                arguments = await _collect_http_tool_arguments(request)
-                result = await server._tool_manager.call_tool(_mirror.tool_name, arguments)
-            except ToolError as exc:
-                return JSONResponse(_tool_error_payload(_mirror.tool_name, exc), status_code=400)
-            except ValueError as exc:
-                return JSONResponse(_tool_error_payload(_mirror.tool_name, exc), status_code=400)
-            payload = to_serializable(result)
-            if isinstance(payload, dict) and "http_bridge" not in payload:
-                payload = dict(payload)
-                payload["http_bridge"] = {
-                    "tool": _mirror.tool_name,
-                    "path": _mirror.path,
-                    "methods": list(_mirror.methods),
-                }
-            return JSONResponse(payload)
+        for index, path in enumerate(mirror.paths):
+            async def _http_mirror_handler(request, *, _mirror: _HTTPToolMirror = mirror, _path: str = path):
+                try:
+                    arguments = await _collect_http_tool_arguments(request)
+                    result = await server._tool_manager.call_tool(_mirror.tool_name, arguments)
+                except ToolError as exc:
+                    return JSONResponse(_tool_error_payload(_mirror.tool_name, exc), status_code=400)
+                except ValueError as exc:
+                    return JSONResponse(_tool_error_payload(_mirror.tool_name, exc), status_code=400)
+                payload = to_serializable(result)
+                if isinstance(payload, dict) and "http_bridge" not in payload:
+                    payload = dict(payload)
+                    payload["http_bridge"] = {
+                        "tool": _mirror.tool_name,
+                        "requested_path": _path,
+                        "paths": list(_mirror.paths),
+                        "methods": list(_mirror.methods),
+                        "registry_paths": list(_http_tool_registry_paths(server)),
+                    }
+                return JSONResponse(payload)
 
-        server.custom_route(
-            mirror.path,
-            methods=list(mirror.methods),
-            name=f"http_tool_{mirror.tool_name}",
-            include_in_schema=True,
-        )(_http_mirror_handler)
+            server.custom_route(
+                path,
+                methods=list(mirror.methods),
+                name=f"http_tool_{mirror.tool_name}_{index}",
+                include_in_schema=True,
+            )(_http_mirror_handler)
 
-    @server.custom_route("/tool_registry", methods=["GET", "POST"], name="tool_registry", include_in_schema=True)
-    async def http_tool_registry(_request) -> Any:
-        return JSONResponse({"tools": _http_mirror_manifest(server)})
+    for index, path in enumerate(_http_tool_registry_paths(server)):
+        @server.custom_route(path, methods=["GET", "POST"], name=f"tool_registry_{index}", include_in_schema=True)
+        async def http_tool_registry(_request) -> Any:
+            return JSONResponse({"tools": _http_mirror_manifest(server), "registry_paths": list(_http_tool_registry_paths(server))})
 
     setattr(server, "_spectral_http_tool_mirrors_installed", True)
 
@@ -538,11 +588,12 @@ def _tool(
     *,
     bounded: bool = False,
     intent_phrases: tuple[str, ...] = (),
-    http_mirror: bool = False,
+    http_mirror: bool = True,
 ):
     def decorator(function):
         catalog = _catalog_for_server(server)
         resolved_description = description
+        tool_meta = None
         if catalog is not None:
             catalog.register(
                 name,
@@ -554,6 +605,7 @@ def _tool(
             resolved_description = catalog.describe(name, description)
         if http_mirror:
             _register_http_mirror(server, name)
+            tool_meta = _http_tool_meta(server, name, ("GET", "POST"))
 
         @wraps(function)
         def wrapped(*args, **kwargs):
@@ -590,6 +642,7 @@ def _tool(
         return server.tool(
             name=name,
             description=resolved_description,
+            meta=tool_meta,
             structured_output=True,
         )(wrapped)
 
@@ -620,6 +673,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     )
     server._spectral_tool_catalog = ToolCatalog()
     server._spectral_http_tool_mirrors = {}
+    server._spectral_http_tool_prefixes = _HTTP_TOOL_ROUTE_PREFIXES
 
     @_tool(
         server,

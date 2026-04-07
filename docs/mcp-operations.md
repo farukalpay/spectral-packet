@@ -147,17 +147,14 @@ Recommended first calls after attaching:
 
 `best_effort_ipv4` is observational only. `endpoint_url` is the internal listener URL; the published public route is [https://lightcap.ai/mcp](https://lightcap.ai/mcp).
 
-For streamable-HTTP deployments, the server also exposes a small compatibility route set for operational checks:
+For streamable-HTTP deployments, every MCP tool is also mirrored through deterministic compatibility routes:
 
+- `GET|POST /<tool_name>`
+- `GET|POST /Lightcap/<tool_name>`
 - `GET|POST /tool_registry`
-- `GET|POST /inspect_mcp_runtime`
-- `GET|POST /validate_installation`
-- `GET|POST /self_test`
-- `GET|POST /server_info`
-- `GET|POST /probe_mcp_runtime`
-- `GET|POST /tunneling_experiment`
+- `GET|POST /Lightcap/tool_registry`
 
-These routes call the same shared tool implementations as MCP `call_tool`; they exist only to keep path-oriented clients aligned with the canonical MCP tool surface.
+These routes call the same shared tool implementations as MCP `call_tool`; they exist only to keep path-oriented clients and exported tool links aligned with the canonical MCP tool surface. `tool_registry` is the authoritative HTTP bridge manifest.
 
 ## 7. Example Prompts
 

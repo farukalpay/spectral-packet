@@ -220,7 +220,7 @@ def test_server_info_reports_bind_facts_when_available() -> None:
     assert payload["bind_host"] == "127.0.0.1"
     assert payload["registered_tool_count"] > 0
     assert payload["tool_catalog_fingerprint"] is not None
-    assert any(route["tool"] == "server_info" for route in payload["http_compatibility_routes"])
+    assert any(route["tool"] == "server_info" and "/Lightcap/server_info" in route["paths"] for route in payload["http_compatibility_routes"])
     assert "network_note" in payload
 
 
@@ -307,22 +307,90 @@ def test_streamable_http_compatibility_routes_expose_runtime_tools_when_availabl
     registry_response = client.get("/tool_registry")
     assert registry_response.status_code == 200
     registry = registry_response.json()["tools"]
-    assert any(route["tool"] == "inspect_mcp_runtime" and route["path"] == "/inspect_mcp_runtime" for route in registry)
-    assert any(route["tool"] == "probe_mcp_runtime" and route["path"] == "/probe_mcp_runtime" for route in registry)
-    assert any(route["tool"] == "tunneling_experiment" and route["path"] == "/tunneling_experiment" for route in registry)
+    assert any(route["tool"] == "inspect_mcp_runtime" and "/inspect_mcp_runtime" in route["paths"] for route in registry)
+    assert any(route["tool"] == "probe_mcp_runtime" and "/Lightcap/probe_mcp_runtime" in route["paths"] for route in registry)
+    assert any(route["tool"] == "tunneling_experiment" and "/Lightcap/tunneling_experiment" in route["paths"] for route in registry)
+    assert any(route["tool"] == "optimize_packet_control" and "/Lightcap/optimize_packet_control" in route["paths"] for route in registry)
+
+    namespaced_registry = client.get("/Lightcap/tool_registry")
+    assert namespaced_registry.status_code == 200
+    assert "/Lightcap/tool_registry" in namespaced_registry.json()["registry_paths"]
 
     runtime_response = client.get("/inspect_mcp_runtime")
     assert runtime_response.status_code == 200
     runtime_payload = runtime_response.json()
     assert runtime_payload["transport"] == "streamable-http"
     assert runtime_payload["inspection_scope"] == "running-instance"
-    assert any(route["tool"] == "validate_installation" for route in runtime_payload["http_compatibility_routes"])
+    assert any(route["tool"] == "validate_installation" and "/Lightcap/validate_installation" in route["paths"] for route in runtime_payload["http_compatibility_routes"])
 
     validate_response = client.get("/validate_installation")
     assert validate_response.status_code == 200
     validate_payload = validate_response.json()
     assert validate_payload["environment"]["mcp_runtime"]["inspection_scope"] == "package-default"
     assert validate_payload["http_bridge"]["tool"] == "validate_installation"
+
+    inspect_product_response = client.get("/Lightcap/inspect_product")
+    assert inspect_product_response.status_code == 200
+    inspect_product_payload = inspect_product_response.json()
+    assert inspect_product_payload["product_name"] == "Spectral Packet Engine"
+    assert inspect_product_payload["http_bridge"]["requested_path"] == "/Lightcap/inspect_product"
+
+    control_response = client.post(
+        "/Lightcap/optimize_packet_control",
+        json={
+            "center": 0.25,
+            "width": 0.08,
+            "wavenumber": 18.0,
+            "phase": 0.0,
+            "objective": "interval_probability",
+            "target_value": 0.35,
+            "final_time": 0.004,
+            "interval": [0.5, 1.0],
+            "num_modes": 48,
+            "quadrature_points": 1024,
+            "grid_points": 64,
+            "steps": 20,
+            "learning_rate": 0.03,
+            "device": "cpu",
+        },
+    )
+    assert control_response.status_code == 200
+    control_payload = control_response.json()
+    assert control_payload["objective"] == "interval_probability"
+    assert control_payload["http_bridge"]["requested_path"] == "/Lightcap/optimize_packet_control"
+
+    scattering_response = client.post(
+        "/Lightcap/analyze_scattering_pipeline",
+        json={
+            "barrier_type": "double",
+            "barrier_height": 20.0,
+            "barrier_width": 0.04,
+            "separation": 0.08,
+        },
+    )
+    assert scattering_response.status_code == 200
+    scattering_payload = scattering_response.json()
+    assert scattering_payload["num_segments"] == 5
+    assert scattering_payload["max_transmission"] >= scattering_payload["min_transmission"]
+    assert scattering_payload["http_bridge"]["requested_path"] == "/Lightcap/analyze_scattering_pipeline"
+
+    tunneling_response = client.post(
+        "/Lightcap/tunneling_experiment",
+        json={
+            "barrier_height": 20.0,
+            "barrier_width_sigma": 0.03,
+            "grid_points": 96,
+            "num_modes": 48,
+            "num_energies": 48,
+            "propagation_steps": 48,
+            "dt": 1e-5,
+            "device": "cpu",
+        },
+    )
+    assert tunneling_response.status_code == 200
+    tunneling_payload = tunneling_response.json()
+    assert tunneling_payload["num_modes"] == 48
+    assert tunneling_payload["http_bridge"]["requested_path"] == "/Lightcap/tunneling_experiment"
 
     self_test_response = client.get("/self_test")
     assert self_test_response.status_code == 200

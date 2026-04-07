@@ -463,6 +463,8 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert by_name["compute_wigner_function"].description.startswith("Use when")
     assert "quantum or classical" in by_name["compute_wigner_function"].description
     assert "read-only" in by_name["query_database"].description
+    assert by_name["inspect_product"].meta["http_bridge"]["paths"] == ["/inspect_product", "/Lightcap/inspect_product"]
+    assert "/Lightcap/tool_registry" in by_name["optimize_packet_control"].meta["http_bridge"]["registry_paths"]
 
 
 def test_mcp_resources_and_prompts_expose_new_inverse_physics_capabilities_when_available() -> None:
