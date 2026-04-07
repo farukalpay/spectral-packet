@@ -200,6 +200,8 @@ The MCP server exposes the same runtime model as the rest of the product:
 - `validate_installation` for surface readiness
 - `inspect_service_status` for uptime, task counters, and recent runs with canonical `workflow_id` plus raw `surface_action`
 
+For streamable-HTTP deployments, operational tools also have explicit compatibility routes such as `/inspect_mcp_runtime`, `/validate_installation`, `/self_test`, `/server_info`, `/probe_mcp_runtime`, `/tunneling_experiment`, and `/tool_registry`. Those routes call the same shared implementations as MCP `call_tool`; MCP remains the canonical control surface.
+
 That lets an MCP client ask:
 
 - is this machine ready,

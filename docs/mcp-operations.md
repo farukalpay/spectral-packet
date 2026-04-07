@@ -147,6 +147,18 @@ Recommended first calls after attaching:
 
 `best_effort_ipv4` is observational only. `endpoint_url` is the internal listener URL; the published public route is [https://lightcap.ai/mcp](https://lightcap.ai/mcp).
 
+For streamable-HTTP deployments, the server also exposes a small compatibility route set for operational checks:
+
+- `GET|POST /tool_registry`
+- `GET|POST /inspect_mcp_runtime`
+- `GET|POST /validate_installation`
+- `GET|POST /self_test`
+- `GET|POST /server_info`
+- `GET|POST /probe_mcp_runtime`
+- `GET|POST /tunneling_experiment`
+
+These routes call the same shared tool implementations as MCP `call_tool`; they exist only to keep path-oriented clients aligned with the canonical MCP tool surface.
+
 ## 7. Example Prompts
 
 Use prompts like these with an attached MCP client:

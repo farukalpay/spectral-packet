@@ -220,6 +220,7 @@ def test_server_info_reports_bind_facts_when_available() -> None:
     assert payload["bind_host"] == "127.0.0.1"
     assert payload["registered_tool_count"] > 0
     assert payload["tool_catalog_fingerprint"] is not None
+    assert any(route["tool"] == "server_info" for route in payload["http_compatibility_routes"])
     assert "network_note" in payload
 
 
@@ -291,3 +292,40 @@ def test_optimize_packet_control_tool_accepts_interval_probability_when_availabl
     payload = __import__("asyncio").run(_call())
     assert payload["objective"] == "interval_probability"
     assert payload["final_interval_probability"] is not None
+
+
+def test_streamable_http_compatibility_routes_expose_runtime_tools_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from starlette.testclient import TestClient
+
+    from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+    server = create_mcp_server(MCPServerConfig(transport="streamable-http", port=8766))
+    client = TestClient(server.streamable_http_app())
+
+    registry_response = client.get("/tool_registry")
+    assert registry_response.status_code == 200
+    registry = registry_response.json()["tools"]
+    assert any(route["tool"] == "inspect_mcp_runtime" and route["path"] == "/inspect_mcp_runtime" for route in registry)
+    assert any(route["tool"] == "probe_mcp_runtime" and route["path"] == "/probe_mcp_runtime" for route in registry)
+    assert any(route["tool"] == "tunneling_experiment" and route["path"] == "/tunneling_experiment" for route in registry)
+
+    runtime_response = client.get("/inspect_mcp_runtime")
+    assert runtime_response.status_code == 200
+    runtime_payload = runtime_response.json()
+    assert runtime_payload["transport"] == "streamable-http"
+    assert runtime_payload["inspection_scope"] == "running-instance"
+    assert any(route["tool"] == "validate_installation" for route in runtime_payload["http_compatibility_routes"])
+
+    validate_response = client.get("/validate_installation")
+    assert validate_response.status_code == 200
+    validate_payload = validate_response.json()
+    assert validate_payload["environment"]["mcp_runtime"]["inspection_scope"] == "package-default"
+    assert validate_payload["http_bridge"]["tool"] == "validate_installation"
+
+    self_test_response = client.get("/self_test")
+    assert self_test_response.status_code == 200
+    self_test_payload = self_test_response.json()
+    assert self_test_payload["overall"] == "all_passed"
+    assert self_test_payload["http_bridge"]["tool"] == "self_test"
