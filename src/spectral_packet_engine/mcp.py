@@ -47,6 +47,15 @@ from spectral_packet_engine.mcp_runtime import (
     inspect_mcp_runtime,
     resolve_mcp_scratch_file,
 )
+from spectral_packet_engine.mcp_security import (
+    WriteRateLimiter,
+    backup_table_before_replace,
+    check_scratch_file_count,
+    check_scratch_total_size,
+    check_sql_safety,
+    check_sql_script_safety,
+    sanitize_filename,
+)
 from spectral_packet_engine.tool_catalog import ToolCatalog
 from spectral_packet_engine.ml import ModalSurrogateConfig
 from spectral_packet_engine.config import SERVER_PURPOSE
@@ -316,6 +325,8 @@ class _MCPExecutionController:
         # Rate limiter: sliding window of call timestamps
         self._call_timestamps: collections.deque[float] = collections.deque()
         self._rate_lock = Lock()
+        # Write-specific rate limiter (stricter)
+        self._write_limiter = WriteRateLimiter(config.write_rate_limit_per_minute)
 
     def check_rate_limit(self) -> None:
         """Enforce per-minute rate limit across all tool calls."""
@@ -1342,6 +1353,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         statement: str,
         parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("execute_database_statement")
+        check_sql_safety(statement, allow_destructive=runtime.config.allow_destructive_sql)
         from spectral_packet_engine.database import check_database_file_size
         result = to_serializable(
             execute_database_statement(
@@ -1360,6 +1373,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         database: str,
         script: str,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("execute_database_script")
+        check_sql_script_safety(script, allow_destructive=runtime.config.allow_destructive_sql)
         from spectral_packet_engine.database import check_database_file_size
         result = to_serializable(
             execute_database_script(
@@ -1382,7 +1397,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         dataset_path: str,
         if_exists: str = "fail",
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("write_database_table")
         _check_not_local_path(dataset_path, "write_database_table")
+        if if_exists == "replace" and runtime.config.auto_backup_on_replace:
+            scratch_dir = _managed_scratch_directory(runtime.config)
+            backup_table_before_replace(database, table_name, scratch_dir)
         result = to_serializable(
             write_tabular_dataset_to_database(
                 database,
@@ -2417,6 +2436,368 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "orthonormality_max_error": ortho["max_offdiagonal_error"],
             "orthonormality_ok": ortho["is_orthonormal"],
         })
+
+    # ================================================================
+    # Sparse Eigensolver & Many-Body Tools
+    # ================================================================
+
+    @_tool(
+        server,
+        runtime,
+        "solve_eigenproblem_sparse",
+        "Solve a large sparse Hamiltonian for its lowest eigenvalues using iterative methods. "
+        "Use when the matrix is too large for dense diagonalization, or when the Hamiltonian is "
+        "sparse (e.g. many-body, lattice, or CI problems). Supports Lanczos, LOBPCG, and Davidson backends.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants sparse or iterative eigensolver",
+            "the user has a large Hamiltonian",
+            "the user asks about many-body eigenvalues",
+            "the user mentions Lanczos, LOBPCG, or Davidson",
+        ),
+    )
+    def solve_eigenproblem_sparse_tool(
+        potential: str = "harmonic",
+        num_points: int = 128,
+        num_states: int = 6,
+        method: str = "lanczos",
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        omega: float = 50.0,
+        tol: float = 1e-10,
+        max_iter: int = 0,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_dense,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.sparse_eigensolver import solve_eigenproblem_sparse as _solve_sparse
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        # Build dense H, then solve sparse
+        from spectral_packet_engine.basis import InfiniteWellBasis, eigenenergies, sine_basis_matrix
+        from spectral_packet_engine.domain import coerce_tensor
+        dtype = domain.real_dtype
+        N = num_points
+        modes = torch.arange(1, N + 1, dtype=dtype, device=resolved)
+        E_n = eigenenergies(domain, modes)
+        num_quad = max(4 * N, 512)
+        quad_grid = domain.grid(num_quad)
+        dx = quad_grid[1] - quad_grid[0]
+        V_vals = coerce_tensor(pot_fn(quad_grid), dtype=dtype, device=resolved)
+        B = sine_basis_matrix(domain, modes, quad_grid)
+        weights = torch.ones(num_quad, dtype=dtype, device=resolved) * dx
+        weights[0] /= 2.0
+        weights[-1] /= 2.0
+        V_mat = B.T @ ((V_vals * weights).unsqueeze(1) * B)
+        H = torch.diag(E_n) + V_mat
+
+        result = _solve_sparse(H, num_states=num_states, method=method, tol=tol, max_iter=max_iter)
+        return to_serializable({
+            "eigenvalues": result.eigenvalues.tolist(),
+            "num_states": result.num_states,
+            "method": result.method,
+            "converged": result.converged,
+            "iterations": result.iterations,
+            "sparsity": result.sparsity,
+            "potential": potential,
+        })
+
+    @_tool(
+        server,
+        runtime,
+        "build_fock_space",
+        "Construct the Fock space for N fermions in M single-particle orbitals. "
+        "Enumerates all valid Slater determinant configurations and returns "
+        "the Hilbert space dimension and configuration summary. "
+        "Use when the user asks about many-body quantum systems, occupation numbers, "
+        "or wants to set up a configuration-interaction calculation.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about Fock space or many-body states",
+            "the user wants to enumerate Slater determinants",
+            "the user asks about occupation numbers or CI configurations",
+        ),
+    )
+    def build_fock_space_tool(
+        num_orbitals: int = 6,
+        num_particles: int = 3,
+    ) -> dict[str, Any]:
+        from spectral_packet_engine.many_body import build_fock_space as _build
+
+        fock = _build(num_orbitals, num_particles)
+        sample = [list(map(int, c)) for c in fock.configs[:min(10, fock.dim)]]
+        return to_serializable({
+            "num_orbitals": fock.num_orbitals,
+            "num_particles": fock.num_particles,
+            "hilbert_space_dim": fock.dim,
+            "sample_configurations": sample,
+            "total_configurations": fock.dim,
+        })
+
+    @_tool(
+        server,
+        runtime,
+        "build_many_body_hamiltonian",
+        "Assemble and diagonalize a many-body Hamiltonian for N fermions in M orbitals. "
+        "Builds creation/annihilation operators as sparse matrices, constructs the "
+        "full CI Hamiltonian H = Σ h_ij a†_i a_j + ½ Σ V_ijkl a†_i a†_j a_l a_k, "
+        "and solves for the lowest eigenvalues. "
+        "Use when the user asks about interacting fermions, CI calculations, "
+        "or many-body ground states.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about many-body Hamiltonian or CI",
+            "the user wants interacting fermion eigenvalues",
+            "the user asks about creation and annihilation operators",
+            "the user wants a second-quantization calculation",
+        ),
+    )
+    def build_many_body_hamiltonian_tool(
+        num_orbitals: int = 6,
+        num_particles: int = 3,
+        num_eigenstates: int = 4,
+        interaction_strength: float = 1.0,
+        potential: str = "harmonic",
+        omega: float = 50.0,
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        solver_method: str = "lanczos",
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_1p,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.many_body import (
+            build_fock_space as _build_fock,
+            compute_one_body_integrals,
+            compute_two_body_integrals,
+            build_many_body_hamiltonian as _build_mb,
+            hamiltonian_to_torch,
+        )
+        from spectral_packet_engine.sparse_eigensolver import solve_eigenproblem_sparse
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        # 1. Solve single-particle problem
+        sp_result = _solve_1p(pot_fn, domain, num_points=128, num_states=num_orbitals)
+
+        # 2. Build Fock space
+        fock = _build_fock(num_orbitals, num_particles)
+
+        # 3. Compute integrals
+        h1 = compute_one_body_integrals(fock, sp_result, domain)
+        h2 = compute_two_body_integrals(fock, sp_result.eigenstates, sp_result.grid)
+
+        # 4. Build many-body H
+        mb = _build_mb(fock, h1, h2, interaction_strength=interaction_strength)
+
+        # 5. Solve
+        H_torch = hamiltonian_to_torch(mb, device=str(resolved))
+        num_solve = min(num_eigenstates, fock.dim - 1)
+        if num_solve < 1:
+            return to_serializable({
+                "error": "Hilbert space too small for requested eigenstates",
+                "hilbert_space_dim": fock.dim,
+            })
+        sparse_result = solve_eigenproblem_sparse(H_torch, num_states=num_solve, method=solver_method)
+
+        return to_serializable({
+            "eigenvalues": sparse_result.eigenvalues.tolist(),
+            "num_states": sparse_result.num_states,
+            "method": sparse_result.method,
+            "converged": sparse_result.converged,
+            "hilbert_space_dim": fock.dim,
+            "num_orbitals": num_orbitals,
+            "num_particles": num_particles,
+            "interaction_strength": interaction_strength,
+            "sparsity": sparse_result.sparsity,
+            "potential": potential,
+        })
+
+    @_tool(
+        server,
+        runtime,
+        "jordan_wigner_transform",
+        "Map a fermionic Hamiltonian to a qubit Hamiltonian via Jordan-Wigner encoding. "
+        "Converts second-quantization operators (a†, a) into Pauli strings (X, Y, Z, I). "
+        "Use when the user asks about qubit Hamiltonians, quantum computing mappings, "
+        "VQE preparation, or fermion-to-qubit transformations.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about Jordan-Wigner transformation",
+            "the user wants a qubit Hamiltonian from fermions",
+            "the user asks about fermion-to-qubit mapping",
+            "the user wants to prepare a VQE Hamiltonian",
+        ),
+    )
+    def jordan_wigner_transform_tool(
+        num_orbitals: int = 4,
+        num_particles: int = 2,
+        potential: str = "harmonic",
+        omega: float = 50.0,
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        interaction_strength: float = 1.0,
+        include_two_body: bool = True,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_1p,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.many_body import (
+            build_fock_space as _build_fock,
+            compute_one_body_integrals,
+            compute_two_body_integrals,
+        )
+        from spectral_packet_engine.qubit_mapping import jordan_wigner_transform as _jw
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        sp_result = _solve_1p(pot_fn, domain, num_points=128, num_states=num_orbitals)
+        fock = _build_fock(num_orbitals, num_particles)
+        h1 = compute_one_body_integrals(fock, sp_result, domain)
+        h2 = compute_two_body_integrals(fock, sp_result.eigenstates, sp_result.grid) if include_two_body else None
+
+        qh = _jw(h1, h2, interaction_strength=interaction_strength)
+        result = qh.to_dict()
+        result["mapping"] = "jordan-wigner"
+        result["num_orbitals"] = num_orbitals
+        result["num_particles"] = num_particles
+        result["interaction_strength"] = interaction_strength
+        # Show top Pauli terms by magnitude
+        sorted_terms = sorted(result["terms"], key=lambda t: abs(t["coefficient_real"]) + abs(t["coefficient_imag"]), reverse=True)
+        result["top_terms"] = sorted_terms[:20]
+        result["terms"] = f"{len(sorted_terms)} terms (showing top 20)"
+        return to_serializable(result)
+
+    @_tool(
+        server,
+        runtime,
+        "bravyi_kitaev_transform",
+        "Map a fermionic Hamiltonian to a qubit Hamiltonian via Bravyi-Kitaev encoding. "
+        "Produces shorter Pauli Z-strings than Jordan-Wigner (O(log M) vs O(M)), "
+        "which translates to shallower quantum circuits. "
+        "Use when the user asks about BK encoding, efficient qubit mappings, "
+        "or wants to compare Jordan-Wigner vs Bravyi-Kitaev.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about Bravyi-Kitaev transformation",
+            "the user wants efficient qubit encoding",
+            "the user wants to compare JW and BK mappings",
+        ),
+    )
+    def bravyi_kitaev_transform_tool(
+        num_orbitals: int = 4,
+        num_particles: int = 2,
+        potential: str = "harmonic",
+        omega: float = 50.0,
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        interaction_strength: float = 1.0,
+        include_two_body: bool = True,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_1p,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.many_body import (
+            build_fock_space as _build_fock,
+            compute_one_body_integrals,
+            compute_two_body_integrals,
+        )
+        from spectral_packet_engine.qubit_mapping import bravyi_kitaev_transform as _bk
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        sp_result = _solve_1p(pot_fn, domain, num_points=128, num_states=num_orbitals)
+        fock = _build_fock(num_orbitals, num_particles)
+        h1 = compute_one_body_integrals(fock, sp_result, domain)
+        h2 = compute_two_body_integrals(fock, sp_result.eigenstates, sp_result.grid) if include_two_body else None
+
+        qh = _bk(h1, h2, interaction_strength=interaction_strength)
+        result = qh.to_dict()
+        result["mapping"] = "bravyi-kitaev"
+        result["num_orbitals"] = num_orbitals
+        result["num_particles"] = num_particles
+        result["interaction_strength"] = interaction_strength
+        sorted_terms = sorted(result["terms"], key=lambda t: abs(t["coefficient_real"]) + abs(t["coefficient_imag"]), reverse=True)
+        result["top_terms"] = sorted_terms[:20]
+        result["terms"] = f"{len(sorted_terms)} terms (showing top 20)"
+        return to_serializable(result)
 
     @_tool(
         server,
@@ -3532,6 +3913,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         filename: str,
         content: str,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("write_scratch_file")
+        sanitize_filename(filename)
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
         max_size = 5 * 1024 * 1024  # 5 MB
         if len(content) > max_size:
             raise ValueError(
@@ -3624,9 +4010,13 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         csv_content: str,
         database: str = "data.db",
         table_name: str = "data",
-        if_exists: str = "replace",
+        if_exists: str = "fail",
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("upload_csv_to_database")
         from spectral_packet_engine.database import check_database_file_size
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
         max_size = 5 * 1024 * 1024
         if len(csv_content) > max_size:
             raise ValueError(
@@ -3637,6 +4027,9 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         csv_path = _managed_scratch_path(runtime.config, csv_filename)
         csv_path.write_text(csv_content, encoding="utf-8")
         db_path = _managed_scratch_path(runtime.config, database)
+        # Auto-backup before replace
+        if if_exists == "replace" and runtime.config.auto_backup_on_replace:
+            backup_table_before_replace(db_path, table_name, scratch_dir)
         try:
             result = to_serializable(
                 write_tabular_dataset_to_database(
@@ -3666,6 +4059,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         csv_content: str,
         filename: str = "profile.csv",
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("upload_csv_for_analysis")
+        sanitize_filename(filename)
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
         max_size = 5 * 1024 * 1024
         if len(csv_content) > max_size:
             raise ValueError(
@@ -3694,6 +4092,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def delete_scratch_file_tool(
         filename: str,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("delete_scratch_file")
+        sanitize_filename(filename)
         path = _managed_scratch_path(runtime.config, filename)
         if not path.exists():
             raise FileNotFoundError(f"File {filename!r} not found in scratch directory.")

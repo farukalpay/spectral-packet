@@ -13,6 +13,7 @@ It is not a generic ML framework, not a grab-bag of physics demos, and not a not
 The stable core already covers:
 
 - bounded-domain packet construction, projection, propagation, and observables,
+  including Gaussian and bounded plane-wave state preparation with explicit support diagnostics,
 - modal decomposition, compression, and artifact-backed profile-table workflows,
 - inverse Gaussian-packet fitting with local uncertainty summaries,
 - arbitrary 1D potentials through the eigensolver and related physics modules.
@@ -158,6 +159,28 @@ report.write_artifacts("artifacts/separable_2d_report")
 print(report.overview.example_name)
 print(report.overview.max_absolute_reference_error)
 ```
+
+### Packet-family projection and propagation
+
+```python
+from spectral_packet_engine import (
+    InfiniteWell1D,
+    make_plane_wave_packet,
+    project_packet_state,
+    simulate_packet_state,
+)
+
+domain = InfiniteWell1D.from_length(1.0)
+packet = make_plane_wave_packet(domain, wavenumber=9.0)
+
+projection = project_packet_state(packet, num_modes=96, device="cpu")
+forward = simulate_packet_state(packet, times=[0.0, 1e-3, 2e-3], num_modes=96, device="cpu")
+
+print(projection.initial_support.boundary_density_mismatch)
+print(forward.position_standard_deviation)
+```
+
+Input is an explicit bounded-domain packet state. Outputs expose projection quality, support diagnostics, probability-preserving propagation, and position-space uncertainty summaries without baking Gaussian-only assumptions into the shared workflow layer.
 
 ### Official benchmark registry
 
