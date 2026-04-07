@@ -101,6 +101,7 @@ def test_cli_env_emits_json(capsys) -> None:
     assert payload["torch_runtime"]["backend"] == "cpu"
     assert "tensorflow_available" in payload
     assert payload["mcp_runtime"]["transport"] == "stdio"
+    assert payload["mcp_runtime"]["inspection_scope"] == "package-default"
 
 
 def test_cli_product_report_emits_shared_identity_json(capsys) -> None:

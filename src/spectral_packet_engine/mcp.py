@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import importlib.util
 import json
 import sys
@@ -385,6 +386,17 @@ def _catalog_for_server(server) -> ToolCatalog | None:
     return getattr(server, "_spectral_tool_catalog", None)
 
 
+def _tool_catalog_fingerprint(server) -> tuple[int, str | None]:
+    catalog = _catalog_for_server(server)
+    if catalog is None:
+        return 0, None
+    tool_names = tuple(sorted(catalog._descriptors))  # Internal use inside the MCP module.
+    if not tool_names:
+        return 0, None
+    digest = hashlib.sha256("\n".join(tool_names).encode("utf-8")).hexdigest()[:12]
+    return len(tool_names), digest
+
+
 def _augment_tool_payload(server, tool_name: str, payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
@@ -547,7 +559,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
 
     @_tool(server, runtime, "inspect_mcp_runtime", "Report MCP transport config: host, port, allowed origins, bounded-execution concurrency limits, and log level.")
     def inspect_mcp_runtime_tool() -> dict[str, Any]:
-        report = to_serializable(inspect_mcp_runtime(runtime_config))
+        report = to_serializable(inspect_mcp_runtime(runtime_config, inspection_scope="running-instance"))
         report["security_limits"] = {
             "max_database_size_mb": runtime.config.max_database_size_mb,
             "max_scratch_databases": runtime.config.max_scratch_databases,
@@ -4298,10 +4310,12 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         import socket
 
         checks: dict[str, Any] = {}
+        tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
 
         # 1. Library version
-        from spectral_packet_engine.version import __version__
+        from spectral_packet_engine.version import __version__, resolve_git_commit
         checks["library_version"] = __version__
+        checks["git_commit"] = resolve_git_commit()
 
         # 2. Server address
         hostname = socket.gethostname()
@@ -4319,6 +4333,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "streamable_http_path": runtime.config.streamable_http_path,
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
+            "registered_tool_count": tool_count,
+            "tool_catalog_fingerprint": tool_catalog_fingerprint,
             "network_note": (
                 "bind_host/bind_port/endpoint_url reflect the configured listener. "
                 "best_effort_ipv4 is observational only and may not be remotely routable."
@@ -4425,7 +4441,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     )
     def server_info_tool() -> dict[str, Any]:
         import socket
-        from spectral_packet_engine.version import __version__
+        from spectral_packet_engine.version import __version__, resolve_git_commit
 
         hostname = socket.gethostname()
         try:
@@ -4434,11 +4450,13 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             local_ip = "127.0.0.1"
 
         scratch_dir = _managed_scratch_directory(runtime.config)
+        tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
 
         return {
             "hostname": hostname,
             "best_effort_ipv4": local_ip,
             "library_version": __version__,
+            "git_commit": resolve_git_commit(),
             "transport": runtime.config.transport,
             "bind_host": runtime.config.host,
             "bind_port": runtime.config.port,
@@ -4447,6 +4465,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "scratch_dir": str(scratch_dir),
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
+            "registered_tool_count": tool_count,
+            "tool_catalog_fingerprint": tool_catalog_fingerprint,
             "max_concurrent_tasks": runtime.config.max_concurrent_tasks,
             "log_destination": runtime.config.log_destination,
             "allow_unsafe_python": runtime.config.allow_unsafe_python,

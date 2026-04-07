@@ -218,6 +218,8 @@ def test_server_info_reports_bind_facts_when_available() -> None:
     payload = __import__("asyncio").run(_call())
     assert payload["transport"] == "stdio"
     assert payload["bind_host"] == "127.0.0.1"
+    assert payload["registered_tool_count"] > 0
+    assert payload["tool_catalog_fingerprint"] is not None
     assert "network_note" in payload
 
 
