@@ -226,14 +226,30 @@ def _register_http_mirror(
 
 
 def _http_mirror_manifest(server) -> list[dict[str, Any]]:
-    return [
-        {
-            "tool": mirror.tool_name,
-            "paths": list(mirror.paths),
-            "methods": list(mirror.methods),
-        }
-        for mirror in _http_mirror_registry(server).values()
-    ]
+    tool_manager = getattr(server, "_tool_manager", None)
+    if tool_manager is None:
+        return [
+            {
+                "tool": mirror.tool_name,
+                "paths": list(mirror.paths),
+                "methods": list(mirror.methods),
+            }
+            for mirror in _http_mirror_registry(server).values()
+        ]
+    mirrors = _http_mirror_registry(server)
+    manifest: list[dict[str, Any]] = []
+    for tool in tool_manager.list_tools():
+        mirror = mirrors.get(tool.name)
+        paths = _default_http_tool_paths(server, tool.name) if mirror is None else mirror.paths
+        methods = ("GET", "POST") if mirror is None else mirror.methods
+        manifest.append(
+            {
+                "tool": tool.name,
+                "paths": list(paths),
+                "methods": list(methods),
+            }
+        )
+    return manifest
 
 
 def _http_tool_meta(server, tool_name: str, methods: tuple[str, ...]) -> dict[str, Any]:
@@ -244,6 +260,18 @@ def _http_tool_meta(server, tool_name: str, methods: tuple[str, ...]) -> dict[st
             "registry_paths": list(_http_tool_registry_paths(server)),
         }
     }
+
+
+def _resolve_http_tool_name(server, tool_name: str) -> str | None:
+    candidate = str(tool_name).strip()
+    if not candidate:
+        return None
+    if getattr(server, "_tool_manager", None) is None:
+        return None
+    tool = server._tool_manager.get_tool(candidate)
+    if tool is None:
+        return None
+    return candidate
 
 
 def _merge_http_argument(arguments: dict[str, Any], key: str, value: Any) -> None:
@@ -281,6 +309,43 @@ async def _collect_http_tool_arguments(request) -> dict[str, Any]:
     return arguments
 
 
+async def _dispatch_http_tool_request(server, tool_name: str, request, *, requested_path: str):
+    from mcp.server.fastmcp.exceptions import ToolError
+    from starlette.responses import JSONResponse
+
+    resolved_tool_name = _resolve_http_tool_name(server, tool_name)
+    if resolved_tool_name is None:
+        return JSONResponse(
+            {
+                "error": True,
+                "error_type": "ToolNotFound",
+                "error_message": f"Unknown HTTP tool bridge target: {tool_name}",
+                "tool": tool_name,
+                "requested_path": requested_path,
+                "registry_paths": list(_http_tool_registry_paths(server)),
+            },
+            status_code=404,
+        )
+    try:
+        arguments = await _collect_http_tool_arguments(request)
+        result = await server._tool_manager.call_tool(resolved_tool_name, arguments)
+    except ToolError as exc:
+        return JSONResponse(_tool_error_payload(resolved_tool_name, exc), status_code=400)
+    except ValueError as exc:
+        return JSONResponse(_tool_error_payload(resolved_tool_name, exc), status_code=400)
+    payload = to_serializable(result)
+    if isinstance(payload, dict) and "http_bridge" not in payload:
+        payload = dict(payload)
+        payload["http_bridge"] = {
+            "tool": resolved_tool_name,
+            "requested_path": requested_path,
+            "paths": list(_default_http_tool_paths(server, resolved_tool_name)),
+            "methods": ["GET", "POST"],
+            "registry_paths": list(_http_tool_registry_paths(server)),
+        }
+    return JSONResponse(payload)
+
+
 def _install_http_tool_mirrors(server) -> None:
     if getattr(server, "_spectral_http_tool_mirrors_installed", False):
         return
@@ -289,30 +354,12 @@ def _install_http_tool_mirrors(server) -> None:
         setattr(server, "_spectral_http_tool_mirrors_installed", True)
         return
 
-    from mcp.server.fastmcp.exceptions import ToolError
     from starlette.responses import JSONResponse
 
     for mirror in mirrors:
         for index, path in enumerate(mirror.paths):
             async def _http_mirror_handler(request, *, _mirror: _HTTPToolMirror = mirror, _path: str = path):
-                try:
-                    arguments = await _collect_http_tool_arguments(request)
-                    result = await server._tool_manager.call_tool(_mirror.tool_name, arguments)
-                except ToolError as exc:
-                    return JSONResponse(_tool_error_payload(_mirror.tool_name, exc), status_code=400)
-                except ValueError as exc:
-                    return JSONResponse(_tool_error_payload(_mirror.tool_name, exc), status_code=400)
-                payload = to_serializable(result)
-                if isinstance(payload, dict) and "http_bridge" not in payload:
-                    payload = dict(payload)
-                    payload["http_bridge"] = {
-                        "tool": _mirror.tool_name,
-                        "requested_path": _path,
-                        "paths": list(_mirror.paths),
-                        "methods": list(_mirror.methods),
-                        "registry_paths": list(_http_tool_registry_paths(server)),
-                    }
-                return JSONResponse(payload)
+                return await _dispatch_http_tool_request(server, _mirror.tool_name, request, requested_path=_path)
 
             server.custom_route(
                 path,
@@ -325,6 +372,15 @@ def _install_http_tool_mirrors(server) -> None:
         @server.custom_route(path, methods=["GET", "POST"], name=f"tool_registry_{index}", include_in_schema=True)
         async def http_tool_registry(_request) -> Any:
             return JSONResponse({"tools": _http_mirror_manifest(server), "registry_paths": list(_http_tool_registry_paths(server))})
+
+    for index, prefix in enumerate(_http_tool_route_prefixes(server)):
+        dynamic_path = f"{prefix}/{{tool_name}}" if prefix else "/{tool_name}"
+
+        @server.custom_route(dynamic_path, methods=["GET", "POST"], name=f"http_tool_dynamic_{index}", include_in_schema=False)
+        async def http_tool_dynamic(request, *, _prefix: str = prefix) -> Any:
+            tool_name = str(request.path_params.get("tool_name", "")).strip()
+            requested_path = f"{_prefix}/{tool_name}" if _prefix else f"/{tool_name}"
+            return await _dispatch_http_tool_request(server, tool_name, request, requested_path=requested_path)
 
     setattr(server, "_spectral_http_tool_mirrors_installed", True)
 
@@ -568,6 +624,19 @@ def _tool_catalog_fingerprint(server) -> tuple[int, str | None]:
     return len(tool_names), digest
 
 
+def _http_bridge_fingerprint(server) -> tuple[int, str | None]:
+    manifest = _http_mirror_manifest(server)
+    if not manifest:
+        return 0, None
+    tokens = []
+    for entry in manifest:
+        tool = str(entry["tool"])
+        paths = tuple(str(path) for path in entry["paths"])
+        tokens.append(f"{tool}:{'|'.join(paths)}")
+    digest = hashlib.sha256("\n".join(sorted(tokens)).encode("utf-8")).hexdigest()[:12]
+    return len(manifest), digest
+
+
 def _augment_tool_payload(server, tool_name: str, payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
@@ -745,6 +814,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     )
     def inspect_mcp_runtime_tool() -> dict[str, Any]:
         report = to_serializable(inspect_mcp_runtime(runtime_config, inspection_scope="running-instance"))
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
         report["security_limits"] = {
             "max_database_size_mb": runtime.config.max_database_size_mb,
             "max_scratch_databases": runtime.config.max_scratch_databases,
@@ -758,6 +828,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "current_scratch_databases": runtime.count_scratch_databases(),
         }
         report["http_compatibility_routes"] = _http_mirror_manifest(server)
+        report["http_bridge_tool_count"] = http_bridge_tool_count
+        report["http_bridge_fingerprint"] = http_bridge_fingerprint
         return report
 
     @_tool(server, runtime, "inspect_service_status", "Report uptime, completed/failed task counts, and recent tool execution history with timing.")
@@ -4506,6 +4578,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
 
         checks: dict[str, Any] = {}
         tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
 
         # 1. Library version
         from spectral_packet_engine.version import __version__, resolve_git_commit
@@ -4530,6 +4603,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "allowed_origins": list(runtime.config.allowed_origins),
             "registered_tool_count": tool_count,
             "tool_catalog_fingerprint": tool_catalog_fingerprint,
+            "http_bridge_tool_count": http_bridge_tool_count,
+            "http_bridge_fingerprint": http_bridge_fingerprint,
             "network_note": (
                 "bind_host/bind_port/endpoint_url reflect the configured listener. "
                 "best_effort_ipv4 is observational only and may not be remotely routable."
@@ -4648,6 +4723,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
 
         scratch_dir = _managed_scratch_directory(runtime.config)
         tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
 
         return {
             "hostname": hostname,
@@ -4664,6 +4740,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "allowed_origins": list(runtime.config.allowed_origins),
             "registered_tool_count": tool_count,
             "tool_catalog_fingerprint": tool_catalog_fingerprint,
+            "http_bridge_tool_count": http_bridge_tool_count,
+            "http_bridge_fingerprint": http_bridge_fingerprint,
             "max_concurrent_tasks": runtime.config.max_concurrent_tasks,
             "log_destination": runtime.config.log_destination,
             "allow_unsafe_python": runtime.config.allow_unsafe_python,

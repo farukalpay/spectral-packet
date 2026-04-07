@@ -144,6 +144,8 @@ Recommended first calls after attaching:
 - `endpoint_url`
 - `allowed_hosts`
 - `allowed_origins`
+- `http_bridge_tool_count`
+- `http_bridge_fingerprint`
 
 `best_effort_ipv4` is observational only. `endpoint_url` is the internal listener URL; the published public route is [https://lightcap.ai/mcp](https://lightcap.ai/mcp).
 

@@ -367,6 +367,8 @@ Use `server_info` after connecting. Treat these fields as authoritative:
 - `bind_port`
 - `streamable_http_path`
 - `endpoint_url`
+- `http_bridge_tool_count`
+- `http_bridge_fingerprint`
 
 Treat `best_effort_ipv4` as observational only.
 

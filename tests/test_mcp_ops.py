@@ -220,6 +220,8 @@ def test_server_info_reports_bind_facts_when_available() -> None:
     assert payload["bind_host"] == "127.0.0.1"
     assert payload["registered_tool_count"] > 0
     assert payload["tool_catalog_fingerprint"] is not None
+    assert payload["http_bridge_tool_count"] >= payload["registered_tool_count"]
+    assert payload["http_bridge_fingerprint"] is not None
     assert any(route["tool"] == "server_info" and "/Lightcap/server_info" in route["paths"] for route in payload["http_compatibility_routes"])
     assert "network_note" in payload
 
@@ -321,6 +323,8 @@ def test_streamable_http_compatibility_routes_expose_runtime_tools_when_availabl
     runtime_payload = runtime_response.json()
     assert runtime_payload["transport"] == "streamable-http"
     assert runtime_payload["inspection_scope"] == "running-instance"
+    assert runtime_payload["http_bridge_tool_count"] > 0
+    assert runtime_payload["http_bridge_fingerprint"] is not None
     assert any(route["tool"] == "validate_installation" and "/Lightcap/validate_installation" in route["paths"] for route in runtime_payload["http_compatibility_routes"])
 
     validate_response = client.get("/validate_installation")
@@ -397,3 +401,36 @@ def test_streamable_http_compatibility_routes_expose_runtime_tools_when_availabl
     self_test_payload = self_test_response.json()
     assert self_test_payload["overall"] == "all_passed"
     assert self_test_payload["http_bridge"]["tool"] == "self_test"
+
+
+def test_streamable_http_dynamic_bridge_tracks_live_tool_manager_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from starlette.testclient import TestClient
+
+    from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+    server = create_mcp_server(MCPServerConfig(transport="streamable-http", port=8766))
+
+    @server.tool(name="dynamic_http_probe", description="Probe the dynamic HTTP bridge.", structured_output=True)
+    def dynamic_http_probe(answer: int = 7) -> dict[str, int]:
+        return {"answer": answer}
+
+    client = TestClient(server.streamable_http_app())
+
+    registry_response = client.get("/Lightcap/tool_registry")
+    assert registry_response.status_code == 200
+    registry = registry_response.json()["tools"]
+    assert any(route["tool"] == "dynamic_http_probe" and "/Lightcap/dynamic_http_probe" in route["paths"] for route in registry)
+
+    probe_response = client.get("/Lightcap/dynamic_http_probe?answer=9")
+    assert probe_response.status_code == 200
+    probe_payload = probe_response.json()
+    assert probe_payload["answer"] == 9
+    assert probe_payload["http_bridge"]["requested_path"] == "/Lightcap/dynamic_http_probe"
+
+    missing_response = client.get("/Lightcap/definitely_missing_tool")
+    assert missing_response.status_code == 404
+    missing_payload = missing_response.json()
+    assert missing_payload["error"] is True
+    assert missing_payload["error_type"] == "ToolNotFound"
