@@ -56,6 +56,8 @@ The core mathematical engine lives in:
 
 `physics_contracts.py` owns the shared `PotentialFamily`, `HamiltonianOperator`, `BasisSpec`, `BoundaryCondition`, `ObservableSet`, and `MeasurementModel` contract so forward, inverse, reduced-model, and surrogate workflows can refer to the same mathematical problem object.
 
+`state.py` owns packet-family preparation and bounded-support diagnostics. Gaussian packets remain a supported analytic family, but the core state layer is not Gaussian-only; reusable packet families project through the same spectral engine and surface explicit domain-support and boundary-mismatch evidence instead of burying those assumptions in interface wrappers.
+
 Advanced physics modules:
 
 - `src/spectral_packet_engine/eigensolver.py` — arbitrary-potential Schrödinger eigenvalue solver

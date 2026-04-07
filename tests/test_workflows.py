@@ -14,14 +14,17 @@ from spectral_packet_engine import (
     export_feature_table_from_database_query,
     export_feature_table_from_profile_table,
     load_tabular_dataset,
+    make_plane_wave_packet,
     parquet_support_is_available,
     ProfileTable,
+    project_packet_state,
     TabularDataset,
     compress_profile_table,
     evaluate_tensorflow_surrogate_on_profile_table,
     fit_gaussian_packet_to_profile_table,
     save_tabular_dataset,
     simulate_gaussian_packet,
+    simulate_packet_state,
     simulate_packet_sweep,
     summarize_profile_table,
     train_tree_model,
@@ -30,6 +33,7 @@ from spectral_packet_engine import (
     tune_tree_model,
     validate_installation,
     write_tabular_dataset_to_database,
+    InfiniteWell1D,
 )
 
 
@@ -116,6 +120,33 @@ def test_fit_gaussian_packet_to_profile_table_recovers_simulated_parameters() ->
     assert result.physical_inference.sensitivity is not None
 
 
+def test_generic_packet_workflows_support_plane_wave_family() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_plane_wave_packet(domain, wavenumber=9.0)
+
+    projection = project_packet_state(
+        packet,
+        num_modes=96,
+        quadrature_points=2048,
+        grid_points=512,
+        device="cpu",
+    )
+    forward = simulate_packet_state(
+        packet,
+        times=[0.0, 1e-3, 2e-3],
+        num_modes=96,
+        quadrature_points=2048,
+        grid_points=512,
+        device="cpu",
+    )
+
+    assert projection.coefficients.shape == (96,)
+    assert float(projection.reconstruction_error) < 0.15
+    assert projection.initial_support.outside_probability_mass[0].item() == pytest.approx(0.0)
+    assert projection.initial_support.boundary_density_mismatch[0].item() > 0.0
+    assert torch.allclose(forward.total_probability, torch.ones_like(forward.total_probability), atol=5e-3, rtol=5e-3)
+
+
 def test_profile_table_summary_and_compression_sweep() -> None:
     table = _synthetic_profile_table()
 
@@ -146,6 +177,24 @@ def test_profile_table_report_exposes_hero_workflow_summary() -> None:
     assert report.overview.dominant_modes[0] >= 1
     assert report.overview.capture_mode_budgets[1].threshold == pytest.approx(0.95)
     assert report.overview.mean_relative_l2_error < 0.2
+
+
+def test_forward_simulation_summary_exposes_position_uncertainty_and_support() -> None:
+    forward = simulate_gaussian_packet(
+        center=0.22,
+        width=0.08,
+        wavenumber=14.0,
+        times=[0.0, 1e-3],
+        num_modes=64,
+        quadrature_points=1024,
+        grid_points=256,
+        device="cpu",
+    )
+
+    assert forward.position_variance.shape == forward.times.shape
+    assert forward.position_standard_deviation.shape == forward.times.shape
+    assert torch.all(forward.position_standard_deviation > 0).item()
+    assert forward.initial_support.inside_probability_mass.shape == (1,)
 
 
 def test_profile_table_report_from_database_query_matches_file_workflow(tmp_path) -> None:

@@ -109,6 +109,7 @@ from spectral_packet_engine.simulation import simulate
 from spectral_packet_engine.state import (
     GaussianPacketParameters,
     PacketState,
+    PacketSupportDiagnostics,
     make_truncated_gaussian_packet,
 )
 from spectral_packet_engine.table_io import (
@@ -419,33 +420,34 @@ class ForwardSimulationSummary:
     grid: Tensor
     densities: Tensor
     expectation_position: Tensor
+    position_variance: Tensor
+    position_standard_deviation: Tensor
     left_probability: Tensor
     right_probability: Tensor
     total_probability: Tensor
     spectral_norm: Tensor
     spatial_norm: Tensor
     truncation: SpectralTruncationSummary
+    initial_support: PacketSupportDiagnostics
 
 
-def _simulate_packet_with_context(
+def _coerce_packet_state_to_context(context: EngineContext, packet: PacketState) -> PacketState:
+    return PacketState(
+        domain=context.domain,
+        parameters=packet.parameters.to(dtype=context.domain.real_dtype, device=context.domain.device),
+        weights=packet.weights.to(dtype=context.domain.complex_dtype, device=context.domain.device),
+        normalize_components=packet.normalize_components,
+    )
+
+
+def _simulate_packet_state_with_context(
     context: EngineContext,
     *,
-    center: float,
-    width: float,
-    wavenumber: float,
-    phase: float = 0.0,
-    weight: complex = 1.0 + 0.0j,
+    packet: PacketState,
     evaluation_times: Tensor,
     grid: Tensor,
 ) -> ForwardSimulationSummary:
-    packet = make_packet_state(
-        context.domain,
-        center=center,
-        width=width,
-        wavenumber=wavenumber,
-        phase=phase,
-        weight=weight,
-    )
+    packet = _coerce_packet_state_to_context(context, packet)
     initial_state = context.projector.project_packet(packet)
     record = simulate(
         packet,
@@ -456,18 +458,50 @@ def _simulate_packet_with_context(
     )
     midpoint = context.domain.midpoint
     initial_wavefunction = packet.wavefunction(grid)
+    position_variance = record.variance_position()
     return ForwardSimulationSummary(
         runtime=context.runtime,
         times=record.times,
         grid=grid,
         densities=record.densities if record.densities is not None else torch.empty(0, device=grid.device),
         expectation_position=record.expectation_position(),
+        position_variance=position_variance,
+        position_standard_deviation=torch.sqrt(torch.clamp(position_variance, min=0.0)),
         left_probability=record.interval_probability(context.domain.left, midpoint),
         right_probability=record.interval_probability(midpoint, context.domain.right),
         total_probability=record.total_probability(),
         spectral_norm=initial_state.norm_squared,
         spatial_norm=total_probability(initial_wavefunction, grid),
         truncation=summarize_spectral_coefficients(initial_state.coefficients),
+        initial_support=packet.support_diagnostics(),
+    )
+
+
+def simulate_packet_state(
+    packet: PacketState,
+    *,
+    times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    grid_points: int = 512,
+    device: str | torch.device | None = "auto",
+) -> ForwardSimulationSummary:
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(packet.domain.length.detach().cpu().item()),
+        left=float(packet.domain.left.detach().cpu().item()),
+        mass=float(packet.domain.mass.detach().cpu().item()),
+        hbar=float(packet.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    grid = context.domain.grid(grid_points)
+    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
+    return _simulate_packet_state_with_context(
+        context,
+        packet=packet,
+        evaluation_times=evaluation_times,
+        grid=grid,
     )
 
 
@@ -484,22 +518,27 @@ def simulate_gaussian_packet(
     grid_points: int = 512,
     device: str | torch.device | None = "auto",
 ) -> ForwardSimulationSummary:
-    context = build_engine(
-        num_modes=num_modes,
-        quadrature_points=quadrature_points,
-        device=device,
+    runtime = inspect_torch_runtime(device)
+    domain = InfiniteWell1D.from_length(
+        1.0,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
     )
-    grid = context.domain.grid(grid_points)
-    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
-    return _simulate_packet_with_context(
-        context,
+    packet = make_packet_state(
+        domain,
         center=center,
         width=width,
         wavenumber=wavenumber,
         phase=phase,
         weight=weight,
-        evaluation_times=evaluation_times,
-        grid=grid,
+    )
+    return simulate_packet_state(
+        packet,
+        times=times,
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        grid_points=grid_points,
+        device=runtime.device,
     )
 
 
@@ -510,6 +549,40 @@ class PacketProjectionSummary:
     reconstruction_error: Tensor
     spectral_norm: Tensor
     truncation: SpectralTruncationSummary
+    initial_support: PacketSupportDiagnostics
+
+
+def project_packet_state(
+    packet: PacketState,
+    *,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    grid_points: int = 2048,
+    device: str | torch.device | None = "auto",
+) -> PacketProjectionSummary:
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(packet.domain.length.detach().cpu().item()),
+        left=float(packet.domain.left.detach().cpu().item()),
+        mass=float(packet.domain.mass.detach().cpu().item()),
+        hbar=float(packet.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    packet = _coerce_packet_state_to_context(context, packet)
+    spectral_state = context.projector.project_packet(packet)
+    grid = context.domain.grid(grid_points)
+    reference = packet.wavefunction(grid)
+    reconstruction = context.projector.reconstruct(spectral_state, grid)
+    reconstruction_error = torch.sqrt(total_probability(reconstruction - reference, grid))
+    return PacketProjectionSummary(
+        runtime=context.runtime,
+        coefficients=spectral_state.coefficients,
+        reconstruction_error=reconstruction_error,
+        spectral_norm=spectral_state.norm_squared,
+        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+        initial_support=packet.support_diagnostics(),
+    )
 
 
 def project_gaussian_packet(
@@ -524,30 +597,26 @@ def project_gaussian_packet(
     grid_points: int = 2048,
     device: str | torch.device | None = "auto",
 ) -> PacketProjectionSummary:
-    context = build_engine(
-        num_modes=num_modes,
-        quadrature_points=quadrature_points,
-        device=device,
+    runtime = inspect_torch_runtime(device)
+    domain = InfiniteWell1D.from_length(
+        1.0,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
     )
     packet = make_packet_state(
-        context.domain,
+        domain,
         center=center,
         width=width,
         wavenumber=wavenumber,
         phase=phase,
         weight=weight,
     )
-    spectral_state = context.projector.project_packet(packet)
-    grid = context.domain.grid(grid_points)
-    reference = packet.wavefunction(grid)
-    reconstruction = context.projector.reconstruct(spectral_state, grid)
-    reconstruction_error = torch.sqrt(total_probability(reconstruction - reference, grid))
-    return PacketProjectionSummary(
-        runtime=context.runtime,
-        coefficients=spectral_state.coefficients,
-        reconstruction_error=reconstruction_error,
-        spectral_norm=spectral_state.norm_squared,
-        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+    return project_packet_state(
+        packet,
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        grid_points=grid_points,
+        device=runtime.device,
     )
 
 
@@ -2613,12 +2682,16 @@ def simulate_packet_sweep(
     items: list[PacketSweepItemSummary] = []
     shared_times = evaluation_times.detach().cpu()
     for spec in packet_specs:
-        summary = _simulate_packet_with_context(
-            context,
+        packet = make_packet_state(
+            context.domain,
             center=float(spec["center"]),
             width=float(spec["width"]),
             wavenumber=float(spec["wavenumber"]),
             phase=float(spec.get("phase", 0.0)),
+        )
+        summary = _simulate_packet_state_with_context(
+            context,
+            packet=packet,
             evaluation_times=evaluation_times,
             grid=grid,
         )
@@ -2732,6 +2805,7 @@ __all__ = [
     "load_profile_table_report",
     "load_tabular_dataset_from_path",
     "make_packet_state",
+    "project_packet_state",
     "materialize_database_query",
     "materialize_profile_table_from_database_query",
     "materialize_database_query_to_table",
@@ -2744,6 +2818,7 @@ __all__ = [
     "run_spectroscopy_workflow",
     "run_transport_resonance_workflow",
     "simulate_gaussian_packet",
+    "simulate_packet_state",
     "simulate_packet_sweep",
     "solve_radial_reduction",
     "summarize_database_query_result",

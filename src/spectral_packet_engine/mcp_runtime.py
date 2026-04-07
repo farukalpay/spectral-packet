@@ -118,6 +118,12 @@ class MCPServerConfig:
     max_unpivot_columns: int = 200
     max_result_rows_materialize: int = 500_000
     rate_limit_per_minute: int = 120
+    # ── Write-specific security limits ──
+    write_rate_limit_per_minute: int = 30
+    max_scratch_files: int = 200
+    max_scratch_total_mb: float = 512.0
+    allow_destructive_sql: bool = False
+    auto_backup_on_replace: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "transport", _normalize_transport(self.transport))
