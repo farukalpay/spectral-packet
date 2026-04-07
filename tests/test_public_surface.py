@@ -62,6 +62,8 @@ def test_product_identity_report_exposes_one_shared_workflow_map() -> None:
     assert any(workflow.workflow_id == "design-transition" for workflow in report.workflows)
     assert any(workflow.workflow_id == "profile-inference-workflow" for workflow in report.workflows)
     assert any(workflow.workflow_id == "official-benchmark-registry" for workflow in report.workflows)
+    control = next(workflow for workflow in report.workflows if workflow.workflow_id == "optimize-packet-control")
+    assert control.surfaces.api == "POST /control/optimize"
 
 
 def test_workflow_guide_prefers_report_first_for_file_and_sql_inputs() -> None:

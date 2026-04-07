@@ -256,3 +256,36 @@ def test_high_level_physics_pipeline_and_nested_probe_run_when_available() -> No
     assert "packet_mean_energy" in tunneling_payload["scattering"]
     assert "transmitted_probability" in tunneling_payload["propagation"]
     assert probe_payload["summary"]["failed_count"] == 0
+
+
+def test_optimize_packet_control_tool_accepts_interval_probability_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "optimize_packet_control",
+            {
+                "center": 0.25,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "phase": 0.0,
+                "objective": "interval_probability",
+                "target_value": 0.35,
+                "final_time": 0.004,
+                "interval": [0.5, 1.0],
+                "num_modes": 48,
+                "quadrature_points": 1024,
+                "grid_points": 64,
+                "steps": 20,
+                "learning_rate": 0.03,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["objective"] == "interval_probability"
+    assert payload["final_interval_probability"] is not None

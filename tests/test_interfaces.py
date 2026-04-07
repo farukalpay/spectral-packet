@@ -222,6 +222,31 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert report_from_sql.json()["overview"]["analyze_num_modes"] == 4
     assert report_from_sql.json()["overview"]["compress_num_modes"] == 3
 
+    control = client.post(
+        "/control/optimize",
+        json={
+            "packet": {
+                "center": 0.25,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "phase": 0.0,
+            },
+            "objective": "interval_probability",
+            "target_value": 0.35,
+            "final_time": 0.004,
+            "interval": [0.5, 1.0],
+            "num_modes": 48,
+            "quadrature_points": 1024,
+            "grid_points": 64,
+            "steps": 20,
+            "learning_rate": 0.03,
+            "device": "cpu",
+        },
+    )
+    assert control.status_code == 200
+    assert control.json()["objective"] == "interval_probability"
+    assert control.json()["final_interval_probability"] is not None
+
     missing_db_query = client.post(
         "/database/query",
         json={

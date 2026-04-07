@@ -306,7 +306,7 @@ spectral-packet-engine design-transition \
 
 ```bash
 spectral-packet-engine optimize-packet-control \
-  --objective target_position \
+  --objective position \
   --target-value 0.55 \
   --final-time 0.004 \
   --device cpu

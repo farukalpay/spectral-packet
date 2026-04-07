@@ -270,6 +270,40 @@ def test_cli_validate_install_and_inspect_table(tmp_path, capsys) -> None:
     assert "spectral_summary" in payload
 
 
+def test_cli_optimize_packet_control_accepts_interval_probability_objective(capsys) -> None:
+    exit_code = main(
+        [
+            "optimize-packet-control",
+            "--objective",
+            "interval_probability",
+            "--target-value",
+            "0.35",
+            "--final-time",
+            "0.004",
+            "--interval",
+            "0.5",
+            "1.0",
+            "--modes",
+            "48",
+            "--quadrature",
+            "1024",
+            "--grid",
+            "64",
+            "--steps",
+            "20",
+            "--learning-rate",
+            "0.03",
+            "--device",
+            "cpu",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["objective"] == "interval_probability"
+    assert payload["final_interval_probability"] is not None
+
+
 def test_cli_inverse_physics_and_reduced_model_commands(tmp_path, capsys) -> None:
     from spectral_packet_engine import InfiniteWell1D, harmonic_potential
     from spectral_packet_engine.eigensolver import solve_eigenproblem
