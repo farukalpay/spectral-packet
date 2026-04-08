@@ -374,6 +374,7 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
             python="optimize_packet_control(...)",
             cli="optimize-packet-control",
             mcp="optimize_packet_control",
+            api="POST /control/optimize",
         ),
         artifact_story="Writes optimization history, final density, and objective-gradient artifacts through the shared differentiable artifact layer.",
     ),

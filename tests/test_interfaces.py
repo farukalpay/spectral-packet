@@ -222,6 +222,31 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert report_from_sql.json()["overview"]["analyze_num_modes"] == 4
     assert report_from_sql.json()["overview"]["compress_num_modes"] == 3
 
+    control = client.post(
+        "/control/optimize",
+        json={
+            "packet": {
+                "center": 0.25,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "phase": 0.0,
+            },
+            "objective": "interval_probability",
+            "target_value": 0.35,
+            "final_time": 0.004,
+            "interval": [0.5, 1.0],
+            "num_modes": 48,
+            "quadrature_points": 1024,
+            "grid_points": 64,
+            "steps": 20,
+            "learning_rate": 0.03,
+            "device": "cpu",
+        },
+    )
+    assert control.status_code == 200
+    assert control.json()["objective"] == "interval_probability"
+    assert control.json()["final_interval_probability"] is not None
+
     missing_db_query = client.post(
         "/database/query",
         json={
@@ -308,6 +333,7 @@ def test_mcp_runtime_report_is_explicit_about_transport_and_supervision() -> Non
     report = inspect_mcp_runtime(MCPServerConfig(max_concurrent_tasks=2, slot_acquire_timeout_seconds=5.0))
 
     assert report.transport == "stdio"
+    assert report.inspection_scope == "configured-runtime"
     assert report.stderr_logging_safe is True
     assert report.forced_cancellation_supported is False
     assert report.config.max_concurrent_tasks == 2
@@ -322,6 +348,7 @@ def test_mcp_runtime_report_is_explicit_about_transport_and_supervision() -> Non
         )
     )
     assert http_report.transport == "streamable-http"
+    assert http_report.inspection_scope == "configured-runtime"
     assert http_report.config.endpoint_url == "http://127.0.0.1:8765/mcp"
     assert http_report.recommended_supervision
     public_http_report = inspect_mcp_runtime(
@@ -436,6 +463,8 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert by_name["compute_wigner_function"].description.startswith("Use when")
     assert "quantum or classical" in by_name["compute_wigner_function"].description
     assert "read-only" in by_name["query_database"].description
+    assert by_name["inspect_product"].meta["http_bridge"]["paths"] == ["/inspect_product", "/Lightcap/inspect_product"]
+    assert "/Lightcap/tool_registry" in by_name["optimize_packet_control"].meta["http_bridge"]["registry_paths"]
 
 
 def test_mcp_resources_and_prompts_expose_new_inverse_physics_capabilities_when_available() -> None:
@@ -526,6 +555,7 @@ def test_mcp_runtime_and_artifact_tools_report_shared_runtime_state_when_availab
     runtime_payload, artifact_payload = asyncio.run(_inspect())
 
     assert runtime_payload["transport"] == "stdio"
+    assert runtime_payload["inspection_scope"] == "running-instance"
     assert runtime_payload["config"]["max_concurrent_tasks"] == 1
     assert runtime_payload["stderr_logging_safe"] is True
     assert artifact_payload["complete"] is True

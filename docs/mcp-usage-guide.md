@@ -302,6 +302,8 @@ The `server_info` tool reports:
 - `bind_port`
 - `streamable_http_path`
 - `endpoint_url`
+- `http_bridge_tool_count`
+- `http_bridge_fingerprint`
 - `best_effort_ipv4`
 
 Use the bind and endpoint fields as the authoritative connection facts. `best_effort_ipv4` is only a best-effort hostname resolution and may not be remotely routable. This matters when:

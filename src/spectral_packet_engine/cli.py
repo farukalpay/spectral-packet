@@ -33,6 +33,7 @@ from spectral_packet_engine.artifacts import (
 )
 from spectral_packet_engine.mcp_runtime import MCPServerConfig
 from spectral_packet_engine.ml import ModalSurrogateConfig
+from spectral_packet_engine.differentiable_physics import ACCEPTED_CONTROL_OBJECTIVES
 from spectral_packet_engine.product import (
     DEFAULT_MCP_LOG_LEVEL,
     DEFAULT_MCP_MAX_CONCURRENT_TASKS,
@@ -916,8 +917,8 @@ def build_parser() -> argparse.ArgumentParser:
     control_parser.add_argument("--phase", type=float, default=0.0)
     control_parser.add_argument(
         "--objective",
-        choices=["target_position", "target_interval_probability"],
-        default="target_position",
+        choices=list(ACCEPTED_CONTROL_OBJECTIVES),
+        default="position",
     )
     control_parser.add_argument("--target-value", type=float, required=True)
     control_parser.add_argument("--final-time", type=float, required=True)

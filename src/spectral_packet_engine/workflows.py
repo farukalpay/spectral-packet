@@ -276,6 +276,9 @@ def validate_installation(preferred_device: str | torch.device | None = "auto") 
         notes.append("The MCP runtime is available.")
     else:
         notes.append("The MCP runtime is not installed.")
+    notes.append(
+        "The validate-install MCP report describes the package-default MCP configuration surface; compare it with the live inspect_mcp_runtime tool on a running server to verify the active instance."
+    )
     notes.extend(environment.mcp_runtime.notes[:2])
     if environment.optional_features["sqlalchemy"]:
         notes.append("Remote SQL backends are available through SQLAlchemy.")

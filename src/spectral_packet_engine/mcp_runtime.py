@@ -7,6 +7,7 @@ import platform
 from pathlib import Path
 
 from spectral_packet_engine.config import PlatformConfig
+from spectral_packet_engine.version import __version__, resolve_git_commit
 
 
 _SUPPORTED_TRANSPORTS = {"stdio", "streamable-http"}
@@ -196,7 +197,10 @@ class MCPServerConfig:
 class MCPRuntimeReport:
     available: bool
     mcp_version: str | None
+    library_version: str
+    git_commit: str | None
     transport: str
+    inspection_scope: str
     system: str
     machine: str
     config: MCPServerConfig
@@ -210,7 +214,10 @@ class MCPRuntimeReport:
         return {
             "available": self.available,
             "mcp_version": self.mcp_version,
+            "library_version": self.library_version,
+            "git_commit": self.git_commit,
             "transport": self.transport,
+            "inspection_scope": self.inspection_scope,
             "system": self.system,
             "machine": self.machine,
             "config": self.config.to_dict(),
@@ -222,8 +229,14 @@ class MCPRuntimeReport:
         }
 
 
-def inspect_mcp_runtime(config: MCPServerConfig | None = None) -> MCPRuntimeReport:
+def inspect_mcp_runtime(
+    config: MCPServerConfig | None = None,
+    *,
+    inspection_scope: str | None = None,
+) -> MCPRuntimeReport:
     chosen_config = config or MCPServerConfig()
+    if inspection_scope is None:
+        inspection_scope = "package-default" if config is None else "configured-runtime"
     available = importlib.util.find_spec("mcp.server.fastmcp") is not None
     mcp_version = _package_version("mcp")
     system = platform.system()
@@ -231,6 +244,13 @@ def inspect_mcp_runtime(config: MCPServerConfig | None = None) -> MCPRuntimeRepo
 
     notes: list[str] = []
     recommended_supervision: list[str] = []
+
+    if inspection_scope == "package-default":
+        notes.append("This MCP report reflects the library's default configuration surface, not a live server instance.")
+    elif inspection_scope == "running-instance":
+        notes.append("This MCP report reflects the currently running MCP server instance.")
+    else:
+        notes.append(f"This MCP report reflects the '{inspection_scope}' configuration scope.")
 
     if not available:
         notes.append("Install the 'mcp' extra to enable the MCP server runtime.")
@@ -281,7 +301,10 @@ def inspect_mcp_runtime(config: MCPServerConfig | None = None) -> MCPRuntimeRepo
     return MCPRuntimeReport(
         available=available,
         mcp_version=mcp_version,
+        library_version=__version__,
+        git_commit=resolve_git_commit(),
         transport=chosen_config.transport,
+        inspection_scope=inspection_scope,
         system=system,
         machine=machine,
         config=chosen_config,

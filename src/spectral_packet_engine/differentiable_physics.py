@@ -3,7 +3,7 @@ from __future__ import annotations
 """Differentiable physics workflows built directly on the spectral core."""
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence, cast
 
 import torch
 
@@ -36,7 +36,21 @@ from spectral_packet_engine.simulation import simulate
 from spectral_packet_engine.state import GaussianPacketParameters, make_truncated_gaussian_packet
 
 Tensor = torch.Tensor
-ControlObjective = Literal["target_position", "target_interval_probability"]
+ControlObjective = Literal["position", "interval_probability"]
+ControlObjectiveInput = Literal["position", "interval_probability", "target_position", "target_interval_probability"]
+SUPPORTED_CONTROL_OBJECTIVES: tuple[ControlObjective, ...] = ("position", "interval_probability")
+ACCEPTED_CONTROL_OBJECTIVES: tuple[ControlObjectiveInput, ...] = (
+    "position",
+    "interval_probability",
+    "target_position",
+    "target_interval_probability",
+)
+_CONTROL_OBJECTIVE_ALIASES: dict[str, ControlObjective] = {
+    "position": "position",
+    "target_position": "position",
+    "interval_probability": "interval_probability",
+    "target_interval_probability": "interval_probability",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +195,16 @@ class _ConstrainedParameterization:
     def mapping_from_vector(self, vector: Tensor) -> dict[str, Tensor]:
         physical = torch.as_tensor(vector, dtype=self.dtype, device=self.device).reshape(len(self.specs))
         return {spec.name: physical[index].reshape(()) for index, spec in enumerate(self.specs)}
+
+
+def normalize_control_objective(objective: str) -> ControlObjective:
+    normalized = _CONTROL_OBJECTIVE_ALIASES.get(objective)
+    if normalized is None:
+        supported = ", ".join(SUPPORTED_CONTROL_OBJECTIVES)
+        raise ValueError(
+            f"unsupported control objective: {objective}. Supported objectives: {supported}"
+        )
+    return cast(ControlObjective, normalized)
 
 
 def _run_optimization(
@@ -520,6 +544,7 @@ def _packet_observable(
     target_value: Tensor,
     interval: tuple[float, float] | None,
 ) -> tuple[Tensor, torch.Tensor, torch.Tensor]:
+    objective = normalize_control_objective(objective)
     packet = make_truncated_gaussian_packet(
         domain,
         center=parameter_vector[0],
@@ -539,12 +564,12 @@ def _packet_observable(
     final_wavefunction = record.wavefunctions[0]
     final_density = record.densities[0]
     final_expectation_position = expectation_position(final_wavefunction, observation_grid)
-    if objective == "target_position":
+    if objective == "position":
         loss = (final_expectation_position - target_value) ** 2
         objective_value = final_expectation_position
-    elif objective == "target_interval_probability":
+    elif objective == "interval_probability":
         if interval is None:
-            raise ValueError("interval must be provided for target_interval_probability")
+            raise ValueError("interval must be provided for interval_probability control")
         interval_probability = record.interval_probability(interval[0], interval[1])[0]
         loss = (interval_probability - target_value) ** 2
         objective_value = interval_probability
@@ -556,7 +581,7 @@ def _packet_observable(
 def compute_packet_observable_gradient(
     *,
     initial_guess: Mapping[str, float],
-    objective: ControlObjective,
+    objective: ControlObjectiveInput,
     target_value: float,
     final_time: float,
     interval: tuple[float, float] | None = None,
@@ -565,6 +590,7 @@ def compute_packet_observable_gradient(
     grid_points: int = 128,
     device: str | torch.device = "auto",
 ) -> ObservableGradientSummary:
+    normalized_objective = normalize_control_objective(objective)
     runtime = inspect_torch_runtime(device)
     domain = InfiniteWell1D.from_length(1.0, dtype=runtime.preferred_real_dtype, device=runtime.device)
     basis = InfiniteWellBasis(domain, num_modes)
@@ -582,7 +608,7 @@ def compute_packet_observable_gradient(
         propagator=propagator,
         observation_grid=observation_grid,
         final_time=final_time_tensor,
-        objective=objective,
+        objective=normalized_objective,
         target_value=target_tensor,
         interval=interval,
     )
@@ -590,7 +616,7 @@ def compute_packet_observable_gradient(
     return ObservableGradientSummary(
         parameter_names=("center", "width", "wavenumber", "phase"),
         parameter_values=parameter_vector.detach(),
-        objective_name=objective,
+        objective_name=normalized_objective,
         objective_value=float(objective_value.detach()),
         gradient=gradient,
     )
@@ -599,7 +625,7 @@ def compute_packet_observable_gradient(
 def optimize_packet_control(
     *,
     initial_guess: Mapping[str, float],
-    objective: ControlObjective,
+    objective: ControlObjectiveInput,
     target_value: float,
     final_time: float,
     interval: tuple[float, float] | None = None,
@@ -609,6 +635,7 @@ def optimize_packet_control(
     optimization_config: GradientOptimizationConfig = GradientOptimizationConfig(),
     device: str | torch.device = "auto",
 ) -> PacketControlOptimizationSummary:
+    normalized_objective = normalize_control_objective(objective)
     runtime = inspect_torch_runtime(device)
     domain = InfiniteWell1D.from_length(1.0, dtype=runtime.preferred_real_dtype, device=runtime.device)
     basis = InfiniteWellBasis(domain, num_modes)
@@ -629,7 +656,7 @@ def optimize_packet_control(
             propagator=propagator,
             observation_grid=observation_grid,
             final_time=final_time_tensor,
-            objective=objective,
+            objective=normalized_objective,
             target_value=target_tensor,
             interval=interval,
         )
@@ -648,7 +675,7 @@ def optimize_packet_control(
         propagator=propagator,
         observation_grid=observation_grid,
         final_time=final_time_tensor,
-        objective=objective,
+        objective=normalized_objective,
         target_value=target_tensor,
         interval=interval,
     )
@@ -680,7 +707,7 @@ def optimize_packet_control(
             "wavenumber": float(parameter_vector[2].item()),
             "phase": float(parameter_vector[3].item()),
         },
-        objective=objective,
+        objective=normalized_objective,
         target_value=target_value,
         final_time=final_time,
         interval=interval,
@@ -691,7 +718,7 @@ def optimize_packet_control(
     )
 
     return PacketControlOptimizationSummary(
-        objective=objective,
+        objective=normalized_objective,
         optimized_parameters=GaussianPacketParameters.single(
             center=parameter_vector[0],
             width=parameter_vector[1],
@@ -719,14 +746,18 @@ def optimize_packet_control(
 
 
 __all__ = [
+    "ACCEPTED_CONTROL_OBJECTIVES",
     "ControlObjective",
+    "ControlObjectiveInput",
     "GradientOptimizationConfig",
     "ObservableGradientSummary",
     "PacketControlOptimizationSummary",
     "PotentialCalibrationSummary",
+    "SUPPORTED_CONTROL_OBJECTIVES",
     "TransitionDesignSummary",
     "calibrate_potential_from_spectrum",
     "compute_packet_observable_gradient",
     "design_potential_for_target_transition",
+    "normalize_control_objective",
     "optimize_packet_control",
 ]

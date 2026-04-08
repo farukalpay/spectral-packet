@@ -62,11 +62,13 @@ from spectral_packet_engine.workflows import (
     inspect_database,
     fit_gaussian_packet_to_density,
     fit_gaussian_packet_to_profile_table_from_database_query,
+    GradientOptimizationConfig,
     inspect_environment,
     inspect_ml_backend_support,
     inspect_tree_backend_support,
     materialize_database_query,
     materialize_database_query_to_table,
+    optimize_packet_control,
     simulate_packet_sweep,
     project_gaussian_packet,
     simulate_gaussian_packet,
@@ -317,6 +319,20 @@ def create_api_app():
     class TransportRequest(BaseModel):
         scan_id: str = "scan11879_56"
         mode_counts: list[int] = Field(default_factory=lambda: [8, 16, 32, 64])
+        device: str = "auto"
+        output_dir: str | None = None
+
+    class PacketControlRequest(BaseModel):
+        packet: PacketSpec = Field(default_factory=PacketSpec)
+        objective: str = "position"
+        target_value: float = 0.60
+        final_time: float = 0.01
+        interval: list[float] | None = None
+        num_modes: int = 96
+        quadrature_points: int = 2048
+        grid_points: int = 128
+        steps: int = 200
+        learning_rate: float = 0.05
         device: str = "auto"
         output_dir: str | None = None
 
@@ -910,6 +926,32 @@ def create_api_app():
                     sort_by_time=request.sort_by_time,
                 ),
             )
+        return to_serializable(summary)
+
+    @app.post("/control/optimize")
+    def control_optimize(request: PacketControlRequest):
+        summary = optimize_packet_control(
+            initial_guess={
+                "center": request.packet.center,
+                "width": request.packet.width,
+                "wavenumber": request.packet.wavenumber,
+                "phase": request.packet.phase,
+            },
+            objective=request.objective,
+            target_value=request.target_value,
+            final_time=request.final_time,
+            interval=None if request.interval is None else (request.interval[0], request.interval[1]),
+            num_modes=request.num_modes,
+            quadrature_points=request.quadrature_points,
+            grid_points=request.grid_points,
+            optimization_config=GradientOptimizationConfig(
+                steps=request.steps,
+                learning_rate=request.learning_rate,
+            ),
+            device=request.device,
+        )
+        if request.output_dir is not None:
+            write_differentiable_artifacts(request.output_dir, summary)
         return to_serializable(summary)
 
     @app.post("/transport/benchmark")

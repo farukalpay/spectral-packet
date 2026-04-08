@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import importlib.util
 import json
 import sys
 import time as _time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -155,6 +156,233 @@ def mcp_is_available() -> bool:
 
 def _coerce_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
     return {} if parameters is None else {str(key): value for key, value in parameters.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPToolMirror:
+    tool_name: str
+    paths: tuple[str, ...]
+    methods: tuple[str, ...]
+
+
+_HTTP_TOOL_ROUTE_PREFIXES = ("", "/Lightcap")
+
+
+def _normalize_http_tool_prefix(prefix: str) -> str:
+    token = str(prefix).strip()
+    if token in {"", "/"}:
+        return ""
+    return "/" + token.strip("/")
+
+
+def _http_tool_route_prefixes(server) -> tuple[str, ...]:
+    raw_prefixes = getattr(server, "_spectral_http_tool_prefixes", _HTTP_TOOL_ROUTE_PREFIXES)
+    normalized = [_normalize_http_tool_prefix(prefix) for prefix in raw_prefixes]
+    return tuple(dict.fromkeys(normalized))
+
+
+def _default_http_tool_paths(server, tool_name: str) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}/{tool_name}" if prefix else f"/{tool_name}"
+        for prefix in _http_tool_route_prefixes(server)
+    )
+
+
+def _http_tool_registry_paths(server) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}/tool_registry" if prefix else "/tool_registry"
+        for prefix in _http_tool_route_prefixes(server)
+    )
+
+
+def _http_mirror_registry(server) -> dict[str, _HTTPToolMirror]:
+    registry = getattr(server, "_spectral_http_tool_mirrors", None)
+    if registry is None:
+        registry = {}
+        setattr(server, "_spectral_http_tool_mirrors", registry)
+    return registry
+
+
+def _register_http_mirror(
+    server,
+    tool_name: str,
+    *,
+    path: str | None = None,
+    methods: tuple[str, ...] = ("GET", "POST"),
+) -> None:
+    registry = _http_mirror_registry(server)
+    if path is None:
+        resolved_paths = _default_http_tool_paths(server, tool_name)
+    else:
+        resolved_path = str(path)
+        if not resolved_path.startswith("/"):
+            resolved_path = f"/{resolved_path}"
+        resolved_paths = (resolved_path,)
+    registry[tool_name] = _HTTPToolMirror(
+        tool_name=tool_name,
+        paths=resolved_paths,
+        methods=tuple(method.upper() for method in methods),
+    )
+
+
+def _http_mirror_manifest(server) -> list[dict[str, Any]]:
+    tool_manager = getattr(server, "_tool_manager", None)
+    if tool_manager is None:
+        return [
+            {
+                "tool": mirror.tool_name,
+                "paths": list(mirror.paths),
+                "methods": list(mirror.methods),
+            }
+            for mirror in _http_mirror_registry(server).values()
+        ]
+    mirrors = _http_mirror_registry(server)
+    manifest: list[dict[str, Any]] = []
+    for tool in tool_manager.list_tools():
+        mirror = mirrors.get(tool.name)
+        paths = _default_http_tool_paths(server, tool.name) if mirror is None else mirror.paths
+        methods = ("GET", "POST") if mirror is None else mirror.methods
+        manifest.append(
+            {
+                "tool": tool.name,
+                "paths": list(paths),
+                "methods": list(methods),
+            }
+        )
+    return manifest
+
+
+def _http_tool_meta(server, tool_name: str, methods: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "http_bridge": {
+            "paths": list(_default_http_tool_paths(server, tool_name)),
+            "methods": list(methods),
+            "registry_paths": list(_http_tool_registry_paths(server)),
+        }
+    }
+
+
+def _resolve_http_tool_name(server, tool_name: str) -> str | None:
+    candidate = str(tool_name).strip()
+    if not candidate:
+        return None
+    if getattr(server, "_tool_manager", None) is None:
+        return None
+    tool = server._tool_manager.get_tool(candidate)
+    if tool is None:
+        return None
+    return candidate
+
+
+def _merge_http_argument(arguments: dict[str, Any], key: str, value: Any) -> None:
+    existing = arguments.get(key)
+    if existing is None:
+        arguments[key] = value
+        return
+    if isinstance(existing, list):
+        existing.append(value)
+        return
+    arguments[key] = [existing, value]
+
+
+async def _collect_http_tool_arguments(request) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    for key, value in request.query_params.multi_items():
+        _merge_http_argument(arguments, str(key), value)
+    if request.method.upper() != "POST":
+        return arguments
+    body = await request.body()
+    if not body:
+        return arguments
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError("HTTP tool bridge expects a JSON object body for POST requests.") from exc
+    if payload is None:
+        return arguments
+    if not isinstance(payload, dict):
+        raise ValueError("HTTP tool bridge expects a JSON object body for POST requests.")
+    if isinstance(payload.get("arguments"), dict) and set(payload).issubset({"tool", "name", "arguments"}):
+        payload = payload["arguments"]
+    for key, value in payload.items():
+        arguments[str(key)] = value
+    return arguments
+
+
+async def _dispatch_http_tool_request(server, tool_name: str, request, *, requested_path: str):
+    from mcp.server.fastmcp.exceptions import ToolError
+    from starlette.responses import JSONResponse
+
+    resolved_tool_name = _resolve_http_tool_name(server, tool_name)
+    if resolved_tool_name is None:
+        return JSONResponse(
+            {
+                "error": True,
+                "error_type": "ToolNotFound",
+                "error_message": f"Unknown HTTP tool bridge target: {tool_name}",
+                "tool": tool_name,
+                "requested_path": requested_path,
+                "registry_paths": list(_http_tool_registry_paths(server)),
+            },
+            status_code=404,
+        )
+    try:
+        arguments = await _collect_http_tool_arguments(request)
+        result = await server._tool_manager.call_tool(resolved_tool_name, arguments)
+    except ToolError as exc:
+        return JSONResponse(_tool_error_payload(resolved_tool_name, exc), status_code=400)
+    except ValueError as exc:
+        return JSONResponse(_tool_error_payload(resolved_tool_name, exc), status_code=400)
+    payload = to_serializable(result)
+    if isinstance(payload, dict) and "http_bridge" not in payload:
+        payload = dict(payload)
+        payload["http_bridge"] = {
+            "tool": resolved_tool_name,
+            "requested_path": requested_path,
+            "paths": list(_default_http_tool_paths(server, resolved_tool_name)),
+            "methods": ["GET", "POST"],
+            "registry_paths": list(_http_tool_registry_paths(server)),
+        }
+    return JSONResponse(payload)
+
+
+def _install_http_tool_mirrors(server) -> None:
+    if getattr(server, "_spectral_http_tool_mirrors_installed", False):
+        return
+    mirrors = tuple(_http_mirror_registry(server).values())
+    if not mirrors:
+        setattr(server, "_spectral_http_tool_mirrors_installed", True)
+        return
+
+    from starlette.responses import JSONResponse
+
+    for mirror in mirrors:
+        for index, path in enumerate(mirror.paths):
+            async def _http_mirror_handler(request, *, _mirror: _HTTPToolMirror = mirror, _path: str = path):
+                return await _dispatch_http_tool_request(server, _mirror.tool_name, request, requested_path=_path)
+
+            server.custom_route(
+                path,
+                methods=list(mirror.methods),
+                name=f"http_tool_{mirror.tool_name}_{index}",
+                include_in_schema=True,
+            )(_http_mirror_handler)
+
+    for index, path in enumerate(_http_tool_registry_paths(server)):
+        @server.custom_route(path, methods=["GET", "POST"], name=f"tool_registry_{index}", include_in_schema=True)
+        async def http_tool_registry(_request) -> Any:
+            return JSONResponse({"tools": _http_mirror_manifest(server), "registry_paths": list(_http_tool_registry_paths(server))})
+
+    for index, prefix in enumerate(_http_tool_route_prefixes(server)):
+        dynamic_path = f"{prefix}/{{tool_name}}" if prefix else "/{tool_name}"
+
+        @server.custom_route(dynamic_path, methods=["GET", "POST"], name=f"http_tool_dynamic_{index}", include_in_schema=False)
+        async def http_tool_dynamic(request, *, _prefix: str = prefix) -> Any:
+            tool_name = str(request.path_params.get("tool_name", "")).strip()
+            requested_path = f"{_prefix}/{tool_name}" if _prefix else f"/{tool_name}"
+            return await _dispatch_http_tool_request(server, tool_name, request, requested_path=requested_path)
+
+    setattr(server, "_spectral_http_tool_mirrors_installed", True)
 
 
 def _run_sql_profile_workflow(
@@ -385,6 +613,30 @@ def _catalog_for_server(server) -> ToolCatalog | None:
     return getattr(server, "_spectral_tool_catalog", None)
 
 
+def _tool_catalog_fingerprint(server) -> tuple[int, str | None]:
+    catalog = _catalog_for_server(server)
+    if catalog is None:
+        return 0, None
+    tool_names = tuple(sorted(catalog._descriptors))  # Internal use inside the MCP module.
+    if not tool_names:
+        return 0, None
+    digest = hashlib.sha256("\n".join(tool_names).encode("utf-8")).hexdigest()[:12]
+    return len(tool_names), digest
+
+
+def _http_bridge_fingerprint(server) -> tuple[int, str | None]:
+    manifest = _http_mirror_manifest(server)
+    if not manifest:
+        return 0, None
+    tokens = []
+    for entry in manifest:
+        tool = str(entry["tool"])
+        paths = tuple(str(path) for path in entry["paths"])
+        tokens.append(f"{tool}:{'|'.join(paths)}")
+    digest = hashlib.sha256("\n".join(sorted(tokens)).encode("utf-8")).hexdigest()[:12]
+    return len(manifest), digest
+
+
 def _augment_tool_payload(server, tool_name: str, payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
@@ -405,10 +657,12 @@ def _tool(
     *,
     bounded: bool = False,
     intent_phrases: tuple[str, ...] = (),
+    http_mirror: bool = True,
 ):
     def decorator(function):
         catalog = _catalog_for_server(server)
         resolved_description = description
+        tool_meta = None
         if catalog is not None:
             catalog.register(
                 name,
@@ -418,6 +672,9 @@ def _tool(
                 intent_phrases=intent_phrases,
             )
             resolved_description = catalog.describe(name, description)
+        if http_mirror:
+            _register_http_mirror(server, name)
+            tool_meta = _http_tool_meta(server, name, ("GET", "POST"))
 
         @wraps(function)
         def wrapped(*args, **kwargs):
@@ -454,6 +711,7 @@ def _tool(
         return server.tool(
             name=name,
             description=resolved_description,
+            meta=tool_meta,
             structured_output=True,
         )(wrapped)
 
@@ -483,6 +741,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         transport_security=_build_transport_security_settings(runtime_config),
     )
     server._spectral_tool_catalog = ToolCatalog()
+    server._spectral_http_tool_mirrors = {}
+    server._spectral_http_tool_prefixes = _HTTP_TOOL_ROUTE_PREFIXES
 
     @_tool(
         server,
@@ -545,9 +805,16 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def inspect_environment_tool(device: str = "auto") -> dict[str, Any]:
         return to_serializable(inspect_environment(device))
 
-    @_tool(server, runtime, "inspect_mcp_runtime", "Report MCP transport config: host, port, allowed origins, bounded-execution concurrency limits, and log level.")
+    @_tool(
+        server,
+        runtime,
+        "inspect_mcp_runtime",
+        "Report MCP transport config: host, port, allowed origins, bounded-execution concurrency limits, and log level.",
+        http_mirror=True,
+    )
     def inspect_mcp_runtime_tool() -> dict[str, Any]:
-        report = to_serializable(inspect_mcp_runtime(runtime_config))
+        report = to_serializable(inspect_mcp_runtime(runtime_config, inspection_scope="running-instance"))
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
         report["security_limits"] = {
             "max_database_size_mb": runtime.config.max_database_size_mb,
             "max_scratch_databases": runtime.config.max_scratch_databases,
@@ -560,13 +827,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "rate_limit_per_minute": runtime.config.rate_limit_per_minute,
             "current_scratch_databases": runtime.count_scratch_databases(),
         }
+        report["http_compatibility_routes"] = _http_mirror_manifest(server)
+        report["http_bridge_tool_count"] = http_bridge_tool_count
+        report["http_bridge_fingerprint"] = http_bridge_fingerprint
         return report
 
     @_tool(server, runtime, "inspect_service_status", "Report uptime, completed/failed task counts, and recent tool execution history with timing.")
     def inspect_service_status_tool() -> dict[str, Any]:
         return to_serializable(inspect_service_status())
 
-    @_tool(server, runtime, "validate_installation", "Check that core, file-IO, SQL, MCP, and ML surfaces are importable and report their status (stable/beta/experimental).")
+    @_tool(
+        server,
+        runtime,
+        "validate_installation",
+        "Check that core, file-IO, SQL, MCP, and ML surfaces are importable and report their status (stable/beta/experimental).",
+        http_mirror=True,
+    )
     def validate_installation_tool(device: str = "auto") -> dict[str, Any]:
         return to_serializable(validate_installation(device))
 
@@ -1118,7 +1394,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         width: float = 0.07,
         wavenumber: float = 25.0,
         phase: float = 0.0,
-        objective: str = "target_position",
+        objective: str = "position",
         target_value: float = 0.60,
         final_time: float = 0.01,
         interval: list[float] | None = None,
@@ -3366,6 +3642,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "the user wants a complete tunneling analysis from a short intent",
             "the caller wants scattering, WKB, propagation, and Wigner diagnostics chained automatically",
         ),
+        http_mirror=True,
     )
     def tunneling_experiment_tool(
         barrier_height: float = 50.0,
@@ -4113,6 +4390,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "This is the repository's self-referential runtime audit workflow: it records startup, tool exposure, "
         "input validation, scratch-path containment, query-guard behavior, and optional repeated/burst stress checks.",
         bounded=True,
+        http_mirror=True,
     )
     def probe_mcp_runtime_tool(output_dir: str | None = None, profile: str = "smoke") -> dict[str, Any]:
         probe_output_dir = output_dir
@@ -4293,15 +4571,19 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "(5) SQL capability, (6) scratch directory access. "
         "Use this after startup to confirm the server is fully operational.",
         bounded=True,
+        http_mirror=True,
     )
     def self_test_tool(device: str = "cpu") -> dict[str, Any]:
         import socket
 
         checks: dict[str, Any] = {}
+        tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
 
         # 1. Library version
-        from spectral_packet_engine.version import __version__
+        from spectral_packet_engine.version import __version__, resolve_git_commit
         checks["library_version"] = __version__
+        checks["git_commit"] = resolve_git_commit()
 
         # 2. Server address
         hostname = socket.gethostname()
@@ -4319,10 +4601,15 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "streamable_http_path": runtime.config.streamable_http_path,
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
+            "registered_tool_count": tool_count,
+            "tool_catalog_fingerprint": tool_catalog_fingerprint,
+            "http_bridge_tool_count": http_bridge_tool_count,
+            "http_bridge_fingerprint": http_bridge_fingerprint,
             "network_note": (
                 "bind_host/bind_port/endpoint_url reflect the configured listener. "
                 "best_effort_ipv4 is observational only and may not be remotely routable."
             ),
+            "http_compatibility_routes": _http_mirror_manifest(server),
         }
 
         from spectral_packet_engine.domain import InfiniteWell1D
@@ -4422,10 +4709,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "the caller needs to verify which MCP server instance is connected",
             "the user wants authoritative endpoint, scratch-directory, or bind-host facts",
         ),
+        http_mirror=True,
     )
     def server_info_tool() -> dict[str, Any]:
         import socket
-        from spectral_packet_engine.version import __version__
+        from spectral_packet_engine.version import __version__, resolve_git_commit
 
         hostname = socket.gethostname()
         try:
@@ -4434,11 +4722,14 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             local_ip = "127.0.0.1"
 
         scratch_dir = _managed_scratch_directory(runtime.config)
+        tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
 
         return {
             "hostname": hostname,
             "best_effort_ipv4": local_ip,
             "library_version": __version__,
+            "git_commit": resolve_git_commit(),
             "transport": runtime.config.transport,
             "bind_host": runtime.config.host,
             "bind_port": runtime.config.port,
@@ -4447,9 +4738,14 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "scratch_dir": str(scratch_dir),
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
+            "registered_tool_count": tool_count,
+            "tool_catalog_fingerprint": tool_catalog_fingerprint,
+            "http_bridge_tool_count": http_bridge_tool_count,
+            "http_bridge_fingerprint": http_bridge_fingerprint,
             "max_concurrent_tasks": runtime.config.max_concurrent_tasks,
             "log_destination": runtime.config.log_destination,
             "allow_unsafe_python": runtime.config.allow_unsafe_python,
+            "http_compatibility_routes": _http_mirror_manifest(server),
             "network_note": (
                 "Use bind_host/bind_port/endpoint_url as the authoritative connection facts. "
                 "best_effort_ipv4 is a best-effort hostname resolution only."
@@ -4521,6 +4817,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             kramers_kronig(frequencies, values, direction=direction)
         )
 
+    _install_http_tool_mirrors(server)
     return server
 
 
