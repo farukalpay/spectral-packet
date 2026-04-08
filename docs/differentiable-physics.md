@@ -44,6 +44,11 @@ control = optimize_packet_control(
 )
 ```
 
+Forward/projection/control state summaries also include density-matrix diagnostics that separate two questions explicitly:
+
+- whether the represented state is still pure after renormalization inside the retained Hilbert space,
+- whether projection or truncation has leaked trace out of that retained space.
+
 ## CLI
 
 ```bash

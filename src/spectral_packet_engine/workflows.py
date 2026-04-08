@@ -29,6 +29,10 @@ from spectral_packet_engine.datasets import (
     available_quantum_gas_transport_scans,
     download_and_prepare_quantum_gas_transport_scan,
 )
+from spectral_packet_engine.density_matrix import (
+    StateDensityMatrixDiagnostics,
+    analyze_state_density_matrix,
+)
 from spectral_packet_engine.diagnostics import (
     ProfileComparisonSummary,
     ReconstructionErrorSummary,
@@ -430,6 +434,7 @@ class ForwardSimulationSummary:
     total_probability: Tensor
     spectral_norm: Tensor
     spatial_norm: Tensor
+    density_matrix: StateDensityMatrixDiagnostics
     truncation: SpectralTruncationSummary
     initial_support: PacketSupportDiagnostics
 
@@ -475,6 +480,7 @@ def _simulate_packet_state_with_context(
         total_probability=record.total_probability(),
         spectral_norm=initial_state.norm_squared,
         spatial_norm=total_probability(initial_wavefunction, grid),
+        density_matrix=analyze_state_density_matrix(record.coefficients),
         truncation=summarize_spectral_coefficients(initial_state.coefficients),
         initial_support=packet.support_diagnostics(),
     )
@@ -551,6 +557,7 @@ class PacketProjectionSummary:
     coefficients: Tensor
     reconstruction_error: Tensor
     spectral_norm: Tensor
+    density_matrix: StateDensityMatrixDiagnostics
     truncation: SpectralTruncationSummary
     initial_support: PacketSupportDiagnostics
 
@@ -583,6 +590,7 @@ def project_packet_state(
         coefficients=spectral_state.coefficients,
         reconstruction_error=reconstruction_error,
         spectral_norm=spectral_state.norm_squared,
+        density_matrix=analyze_state_density_matrix(spectral_state.coefficients),
         truncation=summarize_spectral_coefficients(spectral_state.coefficients),
         initial_support=packet.support_diagnostics(),
     )

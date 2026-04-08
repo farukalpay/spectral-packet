@@ -294,6 +294,8 @@ def test_optimize_packet_control_tool_accepts_interval_probability_when_availabl
     payload = __import__("asyncio").run(_call())
     assert payload["objective"] == "interval_probability"
     assert payload["final_interval_probability"] is not None
+    assert payload["density_matrix"]["normalized_is_pure"] is True
+    assert "trace_defect" in payload["density_matrix"]
 
 
 def test_streamable_http_compatibility_routes_expose_runtime_tools_when_available() -> None:

@@ -303,6 +303,8 @@ def test_cli_optimize_packet_control_accepts_interval_probability_objective(caps
     assert exit_code == 0
     assert payload["objective"] == "interval_probability"
     assert payload["final_interval_probability"] is not None
+    assert payload["density_matrix"]["normalized_is_pure"] is True
+    assert "trace_defect" in payload["density_matrix"]
 
 
 def test_cli_inverse_physics_and_reduced_model_commands(tmp_path, capsys) -> None:

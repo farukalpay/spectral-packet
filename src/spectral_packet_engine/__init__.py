@@ -107,7 +107,9 @@ from spectral_packet_engine.wigner import (
 )
 from spectral_packet_engine.density_matrix import (
     DensityMatrixResult,
+    StateDensityMatrixDiagnostics,
     analyze_density_matrix,
+    analyze_state_density_matrix,
     fidelity,
     mixed_state_density_matrix,
     partial_trace,
@@ -1240,7 +1242,9 @@ __all__ = list(
             "compute_wigner",
             "wigner_from_spectral",
             "DensityMatrixResult",
+            "StateDensityMatrixDiagnostics",
             "analyze_density_matrix",
+            "analyze_state_density_matrix",
             "fidelity",
             "mixed_state_density_matrix",
             "partial_trace",
