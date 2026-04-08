@@ -30,6 +30,7 @@ def test_mcp_module_entrypoint_help_is_available_from_source_checkout() -> None:
 def test_mcp_client_config_and_service_plan_are_explicit() -> None:
     from spectral_packet_engine.mcp_deployment import (
         build_local_mcp_client_configuration,
+        build_mcp_public_ingress_plan,
         build_mcp_service_install_plan,
     )
 
@@ -67,6 +68,17 @@ def test_mcp_client_config_and_service_plan_are_explicit() -> None:
     assert "<key>PYTHONPATH</key>" in macos_plan.manifest
     assert macos_plan.enable_commands[0][1] == "bootout"
     assert macos_plan.enable_commands[1][1] == "bootstrap"
+
+    ingress_plan = build_mcp_public_ingress_plan(
+        public_hosts=("lightcap.ai", "www.lightcap.ai"),
+        public_scheme="https",
+        upstream_port=8765,
+    )
+    assert ingress_plan.public_endpoint_url == "https://lightcap.ai/mcp"
+    assert ingress_plan.allowed_origins == ("https://lightcap.ai", "https://www.lightcap.ai")
+    assert ingress_plan.docker_environment["SPE_ALLOWED_HOSTS"] == "lightcap.ai,lightcap.ai:*,www.lightcap.ai,www.lightcap.ai:*"
+    assert "location = / {" in ingress_plan.nginx_config
+    assert "location = /mcp {" in ingress_plan.nginx_location_snippet
 
 
 def test_execute_python_is_disabled_by_default_when_available() -> None:
@@ -218,6 +230,11 @@ def test_server_info_reports_bind_facts_when_available() -> None:
     payload = __import__("asyncio").run(_call())
     assert payload["transport"] == "stdio"
     assert payload["bind_host"] == "127.0.0.1"
+    assert payload["registered_tool_count"] > 0
+    assert payload["tool_catalog_fingerprint"] is not None
+    assert payload["http_bridge_tool_count"] >= payload["registered_tool_count"]
+    assert payload["http_bridge_fingerprint"] is not None
+    assert any(route["tool"] == "server_info" and "/Lightcap/server_info" in route["paths"] for route in payload["http_compatibility_routes"])
     assert "network_note" in payload
 
 
@@ -250,7 +267,290 @@ def test_high_level_physics_pipeline_and_nested_probe_run_when_available() -> No
 
     potential_payload, tunneling_payload, probe_payload = __import__("asyncio").run(_call())
     assert potential_payload["potential_name"] == "double_well"
+    assert "related_tools" in potential_payload
     assert tunneling_payload["num_modes"] == 48
+    assert "related_tools" in tunneling_payload
     assert "packet_mean_energy" in tunneling_payload["scattering"]
     assert "transmitted_probability" in tunneling_payload["propagation"]
     assert probe_payload["summary"]["failed_count"] == 0
+
+
+def test_optimize_packet_control_tool_accepts_interval_probability_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "optimize_packet_control",
+            {
+                "center": 0.25,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "phase": 0.0,
+                "objective": "interval_probability",
+                "target_value": 0.35,
+                "final_time": 0.004,
+                "interval": [0.5, 1.0],
+                "num_modes": 48,
+                "quadrature_points": 1024,
+                "grid_points": 64,
+                "steps": 20,
+                "learning_rate": 0.03,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["objective"] == "interval_probability"
+    assert payload["final_interval_probability"] is not None
+    assert payload["density_matrix"]["normalized_is_pure"] is True
+    assert "trace_defect" in payload["density_matrix"]
+    assert "phase_space" in payload
+    assert "negativity" in payload["phase_space"]
+
+
+def test_simulate_packet_tool_exposes_phase_space_diagnostics_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "simulate_packet",
+            {
+                "center": 0.22,
+                "width": 0.08,
+                "wavenumber": 14.0,
+                "times": [0.0, 0.001],
+                "num_modes": 32,
+                "quadrature_points": 256,
+                "grid_points": 64,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert "phase_space" in payload
+    assert len(payload["phase_space"]["W"]) == 2
+    assert "density_matrix" in payload
+
+
+def test_project_packet_tool_accepts_sampled_wavefunction_state_spec_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+    wavefunction_real = [0.0, 1.0, 0.0, -1.0, 0.0]
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "project_packet",
+            {
+                "state": {
+                    "family": "sampled_wavefunction",
+                    "grid": grid,
+                    "wavefunction_real": wavefunction_real,
+                },
+                "num_modes": 32,
+                "quadrature_points": 256,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["initial_support"] is None
+    assert payload["spectral_norm"] > 0.0
+    assert "phase_space" in payload
+
+
+def test_compare_box_states_tool_returns_pairwise_diagnostics_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "compare_box_states",
+            {
+                "states": [
+                    {"label": "windowed", "family": "windowed_plane_wave", "center": 0.35, "window_width": 0.24, "wavenumber": 20.0},
+                    {"label": "mode", "family": "box_mode", "mode_index": 8},
+                ],
+                "times": [0.0, 0.001],
+                "interval": [0.55, 0.9],
+                "num_modes": 64,
+                "quadrature_points": 512,
+                "grid_points": 64,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["interval"] == pytest.approx([0.55, 0.9])
+    assert len(payload["states"]) == 2
+    assert len(payload["pairs"]) == 1
+    assert payload["states"][0]["forward"]["tracked_interval_probability"] is not None
+    assert payload["pairs"][0]["comparison"]["fidelity"] < 0.999
+
+
+def test_streamable_http_compatibility_routes_expose_runtime_tools_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from starlette.testclient import TestClient
+
+    from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+    server = create_mcp_server(MCPServerConfig(transport="streamable-http", port=8766))
+    client = TestClient(server.streamable_http_app())
+
+    registry_response = client.get("/tool_registry")
+    assert registry_response.status_code == 200
+    registry = registry_response.json()["tools"]
+    assert any(route["tool"] == "inspect_mcp_runtime" and "/inspect_mcp_runtime" in route["paths"] for route in registry)
+    assert any(route["tool"] == "inspect_mcp_runtime" and "/mcp/inspect_mcp_runtime" in route["paths"] for route in registry)
+    assert any(route["tool"] == "probe_mcp_runtime" and "/Lightcap/probe_mcp_runtime" in route["paths"] for route in registry)
+    assert any(route["tool"] == "tunneling_experiment" and "/Lightcap/tunneling_experiment" in route["paths"] for route in registry)
+    assert any(route["tool"] == "optimize_packet_control" and "/Lightcap/optimize_packet_control" in route["paths"] for route in registry)
+
+    namespaced_registry = client.get("/Lightcap/tool_registry")
+    assert namespaced_registry.status_code == 200
+    assert "/Lightcap/tool_registry" in namespaced_registry.json()["registry_paths"]
+
+    scoped_registry = client.get("/mcp/tool_registry")
+    assert scoped_registry.status_code == 200
+    assert "/mcp/tool_registry" in scoped_registry.json()["registry_paths"]
+
+    scoped_namespaced_registry = client.get("/mcp/Lightcap/tool_registry")
+    assert scoped_namespaced_registry.status_code == 200
+    assert "/mcp/Lightcap/tool_registry" in scoped_namespaced_registry.json()["registry_paths"]
+
+    runtime_response = client.get("/inspect_mcp_runtime")
+    assert runtime_response.status_code == 200
+    runtime_payload = runtime_response.json()
+    assert runtime_payload["transport"] == "streamable-http"
+    assert runtime_payload["inspection_scope"] == "running-instance"
+    assert runtime_payload["http_bridge_tool_count"] > 0
+    assert runtime_payload["http_bridge_fingerprint"] is not None
+    assert any(route["tool"] == "validate_installation" and "/Lightcap/validate_installation" in route["paths"] for route in runtime_payload["http_compatibility_routes"])
+
+    validate_response = client.get("/validate_installation")
+    assert validate_response.status_code == 200
+    validate_payload = validate_response.json()
+    assert validate_payload["environment"]["mcp_runtime"]["inspection_scope"] == "package-default"
+    assert validate_payload["http_bridge"]["tool"] == "validate_installation"
+
+    inspect_product_response = client.get("/Lightcap/inspect_product")
+    assert inspect_product_response.status_code == 200
+    inspect_product_payload = inspect_product_response.json()
+    assert inspect_product_payload["product_name"] == "Spectral Packet Engine"
+    assert inspect_product_payload["http_bridge"]["requested_path"] == "/Lightcap/inspect_product"
+
+    scoped_inspect_product_response = client.get("/mcp/inspect_product")
+    assert scoped_inspect_product_response.status_code == 200
+    assert scoped_inspect_product_response.json()["http_bridge"]["requested_path"] == "/mcp/inspect_product"
+
+    control_response = client.post(
+        "/Lightcap/optimize_packet_control",
+        json={
+            "center": 0.25,
+            "width": 0.08,
+            "wavenumber": 18.0,
+            "phase": 0.0,
+            "objective": "interval_probability",
+            "target_value": 0.35,
+            "final_time": 0.004,
+            "interval": [0.5, 1.0],
+            "num_modes": 48,
+            "quadrature_points": 1024,
+            "grid_points": 64,
+            "steps": 20,
+            "learning_rate": 0.03,
+            "device": "cpu",
+        },
+    )
+    assert control_response.status_code == 200
+    control_payload = control_response.json()
+    assert control_payload["objective"] == "interval_probability"
+    assert control_payload["http_bridge"]["requested_path"] == "/Lightcap/optimize_packet_control"
+
+    scattering_response = client.post(
+        "/Lightcap/analyze_scattering_pipeline",
+        json={
+            "barrier_type": "double",
+            "barrier_height": 20.0,
+            "barrier_width": 0.04,
+            "separation": 0.08,
+        },
+    )
+    assert scattering_response.status_code == 200
+    scattering_payload = scattering_response.json()
+    assert scattering_payload["num_segments"] == 5
+    assert scattering_payload["max_transmission"] >= scattering_payload["min_transmission"]
+    assert scattering_payload["http_bridge"]["requested_path"] == "/Lightcap/analyze_scattering_pipeline"
+
+    tunneling_response = client.post(
+        "/Lightcap/tunneling_experiment",
+        json={
+            "barrier_height": 20.0,
+            "barrier_width_sigma": 0.03,
+            "grid_points": 96,
+            "num_modes": 48,
+            "num_energies": 48,
+            "propagation_steps": 48,
+            "dt": 1e-5,
+            "device": "cpu",
+        },
+    )
+    assert tunneling_response.status_code == 200
+    tunneling_payload = tunneling_response.json()
+    assert tunneling_payload["num_modes"] == 48
+    assert tunneling_payload["http_bridge"]["requested_path"] == "/Lightcap/tunneling_experiment"
+
+    self_test_response = client.get("/self_test")
+    assert self_test_response.status_code == 200
+    self_test_payload = self_test_response.json()
+    assert self_test_payload["overall"] == "all_passed"
+    assert self_test_payload["http_bridge"]["tool"] == "self_test"
+
+
+def test_streamable_http_dynamic_bridge_tracks_live_tool_manager_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from starlette.testclient import TestClient
+
+    from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+    server = create_mcp_server(MCPServerConfig(transport="streamable-http", port=8766))
+
+    @server.tool(name="dynamic_http_probe", description="Probe the dynamic HTTP bridge.", structured_output=True)
+    def dynamic_http_probe(answer: int = 7) -> dict[str, int]:
+        return {"answer": answer}
+
+    client = TestClient(server.streamable_http_app())
+
+    registry_response = client.get("/Lightcap/tool_registry")
+    assert registry_response.status_code == 200
+    registry = registry_response.json()["tools"]
+    assert any(route["tool"] == "dynamic_http_probe" and "/Lightcap/dynamic_http_probe" in route["paths"] for route in registry)
+
+    probe_response = client.get("/Lightcap/dynamic_http_probe?answer=9")
+    assert probe_response.status_code == 200
+    probe_payload = probe_response.json()
+    assert probe_payload["answer"] == 9
+    assert probe_payload["http_bridge"]["requested_path"] == "/Lightcap/dynamic_http_probe"
+
+    missing_response = client.get("/Lightcap/definitely_missing_tool")
+    assert missing_response.status_code == 404
+    missing_payload = missing_response.json()
+    assert missing_payload["error"] is True
+    assert missing_payload["error_type"] == "ToolNotFound"

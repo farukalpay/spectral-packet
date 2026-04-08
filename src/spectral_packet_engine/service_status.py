@@ -78,18 +78,30 @@ def configure_service_logging(
             except Exception:
                 _LOGGER.debug("Failed to close managed logging handler %r", handler)
 
+    fallback_warning: tuple[Path, OSError] | None = None
     if log_file is None:
         handler = logging.StreamHandler(sys.stderr)
     else:
         log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(log_path, encoding="utf-8")
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(log_path, encoding="utf-8")
+        except OSError as exc:
+            handler = logging.StreamHandler(sys.stderr)
+            fallback_warning = (log_path, exc)
     handler._spectral_packet_engine_managed = True  # type: ignore[attr-defined]
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     )
     _LOGGER.addHandler(handler)
     _LOGGER.setLevel(getattr(logging, normalized_level))
+    if fallback_warning is not None:
+        log_path, error = fallback_warning
+        _LOGGER.warning(
+            "Falling back to stderr because service log file %s could not be opened: %s",
+            log_path,
+            error,
+        )
 
 
 def _log_service_event(event: str, *, level: int = logging.INFO, **fields: Any) -> None:

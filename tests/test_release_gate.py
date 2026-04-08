@@ -203,7 +203,8 @@ def test_release_gate_status_contract_is_consistent_across_python_api_and_mcp() 
         return payload
 
     mcp_status = asyncio.run(_status())
-    assert set(mcp_status.keys()) == set(python_status.keys())
+    assert "related_tools" in mcp_status
+    assert set(mcp_status.keys()) - {"related_tools"} == set(python_status.keys())
 
 
 def test_release_gate_report_captures_local_validation_state() -> None:

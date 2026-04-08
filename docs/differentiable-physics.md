@@ -37,12 +37,17 @@ design = design_potential_for_target_transition(
 
 control = optimize_packet_control(
     initial_guess={"center": 0.30, "width": 0.07, "wavenumber": 25.0, "phase": 0.0},
-    objective="target_position",
+    objective="position",
     target_value=0.55,
     final_time=0.004,
     device="cpu",
 )
 ```
+
+Forward/projection/control state summaries also include density-matrix diagnostics that separate two questions explicitly:
+
+- whether the represented state is still pure after renormalization inside the retained Hilbert space,
+- whether projection or truncation has leaked trace out of that retained space.
 
 ## CLI
 
@@ -56,7 +61,7 @@ spectral-packet-engine design-transition \
 
 ```bash
 spectral-packet-engine optimize-packet-control \
-  --objective target_position \
+  --objective position \
   --target-value 0.55 \
   --final-time 0.004 \
   --device cpu

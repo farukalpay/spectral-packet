@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import importlib.util
 import json
+import math
 import sys
 import time as _time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -47,7 +49,22 @@ from spectral_packet_engine.mcp_runtime import (
     inspect_mcp_runtime,
     resolve_mcp_scratch_file,
 )
+from spectral_packet_engine.mcp_security import (
+    WriteRateLimiter,
+    backup_table_before_replace,
+    check_scratch_file_count,
+    check_scratch_total_size,
+    check_sql_safety,
+    check_sql_script_safety,
+    sanitize_filename,
+)
+from spectral_packet_engine.tool_catalog import ToolCatalog
 from spectral_packet_engine.ml import ModalSurrogateConfig
+from spectral_packet_engine.urban_climate import (
+    HumanThermalResponseConfig,
+    UrbanBoundaryLayerConfig,
+    UrbanRadiativeTransferConfig,
+)
 from spectral_packet_engine.config import SERVER_PURPOSE
 from spectral_packet_engine.product import (
     DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
@@ -65,8 +82,8 @@ from spectral_packet_engine.service_status import (
     track_service_task,
 )
 from spectral_packet_engine.synthetic_profiles import generate_synthetic_profile_table
-from spectral_packet_engine.tabular import load_tabular_dataset, supported_tabular_formats
-from spectral_packet_engine.table_io import load_profile_table, save_profile_table_csv, supported_profile_table_formats
+from spectral_packet_engine.tabular import load_tabular_dataset, save_tabular_dataset, supported_tabular_formats
+from spectral_packet_engine.table_io import load_profile_table, save_profile_table, save_profile_table_csv, supported_profile_table_formats
 from spectral_packet_engine.tf_surrogate import TensorFlowRegressorConfig
 from spectral_packet_engine.workflows import (
     analyze_coupled_channel_surfaces,
@@ -74,14 +91,17 @@ from spectral_packet_engine.workflows import (
     analyze_profile_table_from_database_query,
     analyze_separable_tensor_product_spectrum,
     benchmark_transport_scan,
+    build_profile_table_report,
     build_profile_table_report_from_database_query,
     bootstrap_local_database,
     compare_profile_tables,
+    compare_state_trajectories,
     compress_profile_table,
     compress_profile_table_from_database_query,
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    derive_urban_microclimate_from_tabular_dataset,
     describe_potential_families,
     design_potential_for_target_transition,
     execute_database_script,
@@ -99,17 +119,22 @@ from spectral_packet_engine.workflows import (
     inspect_environment,
     inspect_ml_backend_support,
     inspect_tree_backend_support,
-    load_profile_table_report,
+    ingest_open_meteo_hourly_dataset,
     materialize_database_query,
     materialize_database_query_to_table,
     optimize_packet_control,
-    simulate_packet_sweep,
     project_gaussian_packet,
+    project_packet_state,
+    project_spectral_state,
+    project_wavefunction_state,
     run_control_workflow,
     run_profile_inference_workflow,
     run_spectroscopy_workflow,
     run_transport_resonance_workflow,
     simulate_gaussian_packet,
+    simulate_packet_state,
+    simulate_spectral_state,
+    simulate_packet_sweep,
     solve_radial_reduction,
     summarize_database_query_result,
     summarize_profile_table,
@@ -147,6 +172,440 @@ def _coerce_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
     return {} if parameters is None else {str(key): value for key, value in parameters.items()}
 
 
+_STATE_FAMILY_ALIASES = {
+    "gaussian": "gaussian",
+    "plane_wave": "plane_wave",
+    "plane-wave": "plane_wave",
+    "windowed_plane_wave": "windowed_plane_wave",
+    "windowed-plane-wave": "windowed_plane_wave",
+    "box_mode": "box_mode",
+    "mode": "box_mode",
+    "spectral": "spectral_coefficients",
+    "spectral_coefficients": "spectral_coefficients",
+    "spectral-coefficients": "spectral_coefficients",
+    "wavefunction": "sampled_wavefunction",
+    "sampled_wavefunction": "sampled_wavefunction",
+    "sampled-wavefunction": "sampled_wavefunction",
+}
+
+
+def _normalized_state_family(spec: dict[str, Any]) -> str:
+    raw_family = str(spec.get("family", spec.get("kind", "gaussian"))).strip().lower()
+    family = _STATE_FAMILY_ALIASES.get(raw_family)
+    if family is None:
+        supported = ", ".join(sorted(set(_STATE_FAMILY_ALIASES.values())))
+        raise ValueError(f"unsupported state family: {raw_family}. Supported families: {supported}")
+    return family
+
+
+def _coerce_complex_vector(
+    real_values: Any,
+    imag_values: Any,
+    *,
+    field_name: str,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if real_values is None:
+        raise ValueError(f"{field_name}_real must be provided")
+    real_tensor = torch.as_tensor(real_values, dtype=dtype, device=device).reshape(-1)
+    if imag_values is None:
+        imag_tensor = torch.zeros_like(real_tensor)
+    else:
+        imag_tensor = torch.as_tensor(imag_values, dtype=dtype, device=device).reshape(-1)
+    if real_tensor.shape != imag_tensor.shape:
+        raise ValueError(f"{field_name}_real and {field_name}_imag must have matching shapes")
+    return real_tensor.to(dtype=torch.complex128 if dtype == torch.float64 else torch.complex64) + 1j * imag_tensor.to(
+        dtype=torch.complex128 if dtype == torch.float64 else torch.complex64
+    )
+
+
+def _state_domain_from_spec(spec: dict[str, Any], *, device: str | torch.device | None) -> tuple[Any, Any, torch.Tensor | None]:
+    from spectral_packet_engine.domain import InfiniteWell1D
+    from spectral_packet_engine.runtime import inspect_torch_runtime
+
+    runtime = inspect_torch_runtime(device)
+    grid_values = spec.get("grid")
+    grid_tensor = None
+    if grid_values is not None:
+        grid_tensor = torch.as_tensor(grid_values, dtype=runtime.preferred_real_dtype, device=runtime.device).reshape(-1)
+        if grid_tensor.ndim != 1 or grid_tensor.shape[0] < 2:
+            raise ValueError("grid must contain at least two sample points")
+    left = float(spec.get("left", grid_tensor[0].item() if grid_tensor is not None else 0.0))
+    if "domain_length" in spec:
+        domain_length = float(spec["domain_length"])
+    elif grid_tensor is not None:
+        domain_length = float((grid_tensor[-1] - grid_tensor[0]).item())
+    else:
+        domain_length = 1.0
+    mass = float(spec.get("mass", 1.0))
+    hbar = float(spec.get("hbar", 1.0))
+    domain = InfiniteWell1D.from_length(
+        domain_length,
+        left=left,
+        mass=mass,
+        hbar=hbar,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    return runtime, domain, grid_tensor
+
+
+def _coerce_tool_state_spec(
+    spec: dict[str, Any] | None,
+    *,
+    num_modes: int,
+    quadrature_points: int,
+    device: str | torch.device | None,
+    fallback_gaussian: dict[str, Any] | None = None,
+):
+    from spectral_packet_engine.basis import InfiniteWellBasis
+    from spectral_packet_engine.projector import ProjectionConfig, StateProjector
+    from spectral_packet_engine.state import (
+        SpectralState,
+        make_box_mode_spectral_state,
+        make_plane_wave_packet,
+        make_truncated_gaussian_packet,
+        make_windowed_plane_wave_packet,
+    )
+
+    state_spec = {} if spec is None else _coerce_parameters(spec)
+    if spec is None and fallback_gaussian is not None:
+        state_spec = {"family": "gaussian", **fallback_gaussian}
+    if not isinstance(state_spec, dict):
+        raise ValueError("state must be a JSON object when provided")
+
+    family = _normalized_state_family(state_spec)
+    runtime, domain, grid_tensor = _state_domain_from_spec(state_spec, device=device)
+
+    if family == "gaussian":
+        return family, make_truncated_gaussian_packet(
+            domain,
+            center=float(state_spec["center"]),
+            width=float(state_spec["width"]),
+            wavenumber=float(state_spec["wavenumber"]),
+            phase=float(state_spec.get("phase", 0.0)),
+        )
+    if family == "plane_wave":
+        return family, make_plane_wave_packet(
+            domain,
+            wavenumber=float(state_spec["wavenumber"]),
+            phase=float(state_spec.get("phase", 0.0)),
+        )
+    if family == "windowed_plane_wave":
+        return family, make_windowed_plane_wave_packet(
+            domain,
+            center=float(state_spec["center"]),
+            window_width=float(state_spec["window_width"]),
+            wavenumber=float(state_spec["wavenumber"]),
+            phase=float(state_spec.get("phase", 0.0)),
+        )
+    if family == "box_mode":
+        phase = float(state_spec.get("phase", 0.0))
+        return family, make_box_mode_spectral_state(
+            domain,
+            mode_index=int(state_spec["mode_index"]),
+            num_modes=num_modes,
+            weight=complex(math.cos(phase), math.sin(phase)),
+        )
+    if family == "spectral_coefficients":
+        coefficients = _coerce_complex_vector(
+            state_spec.get("coefficients_real"),
+            state_spec.get("coefficients_imag"),
+            field_name="coefficients",
+            dtype=runtime.preferred_real_dtype,
+            device=runtime.device,
+        )
+        return family, SpectralState(domain=domain, coefficients=coefficients)
+    if family == "sampled_wavefunction":
+        if grid_tensor is None:
+            raise ValueError("sampled_wavefunction state requires a grid")
+        wavefunction = _coerce_complex_vector(
+            state_spec.get("wavefunction_real", state_spec.get("values_real")),
+            state_spec.get("wavefunction_imag", state_spec.get("values_imag")),
+            field_name="wavefunction",
+            dtype=runtime.preferred_real_dtype,
+            device=runtime.device,
+        )
+        if wavefunction.shape[0] != grid_tensor.shape[0]:
+            raise ValueError("wavefunction samples must align with the provided grid")
+        projector = StateProjector(
+            InfiniteWellBasis(domain, num_modes),
+            ProjectionConfig(quadrature_points=quadrature_points),
+        )
+        return family, projector.project_wavefunction(wavefunction, grid_tensor)
+    raise AssertionError(f"unhandled state family: {family}")
+
+
+def _tool_state_label(spec: dict[str, Any], index: int) -> str:
+    label = str(spec.get("label", "")).strip()
+    return label or f"state_{index + 1}"
+
+
+def _project_sampled_wavefunction_from_spec(
+    spec: dict[str, Any],
+    *,
+    num_modes: int,
+    quadrature_points: int,
+    device: str | torch.device | None,
+):
+    runtime, _, grid_tensor = _state_domain_from_spec(spec, device=device)
+    if grid_tensor is None:
+        raise ValueError("sampled_wavefunction state requires a grid")
+    wavefunction = _coerce_complex_vector(
+        spec.get("wavefunction_real", spec.get("values_real")),
+        spec.get("wavefunction_imag", spec.get("values_imag")),
+        field_name="wavefunction",
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    if wavefunction.shape[0] != grid_tensor.shape[0]:
+        raise ValueError("wavefunction samples must align with the provided grid")
+    return project_wavefunction_state(
+        wavefunction,
+        grid_tensor,
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        device=device,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPToolMirror:
+    tool_name: str
+    paths: tuple[str, ...]
+    methods: tuple[str, ...]
+
+
+_HTTP_TOOL_ROUTE_PREFIXES = ("", "/Lightcap")
+
+
+def _normalize_http_tool_prefix(prefix: str) -> str:
+    token = str(prefix).strip()
+    if token in {"", "/"}:
+        return ""
+    return "/" + token.strip("/")
+
+
+def _http_tool_route_prefixes(server) -> tuple[str, ...]:
+    raw_prefixes = getattr(server, "_spectral_http_tool_prefixes", _HTTP_TOOL_ROUTE_PREFIXES)
+    base_prefixes = tuple(dict.fromkeys(_normalize_http_tool_prefix(prefix) for prefix in raw_prefixes))
+    runtime_config = getattr(server, "_spectral_runtime_config", None)
+    if runtime_config is None or runtime_config.transport != "streamable-http":
+        return base_prefixes
+
+    scoped_prefix = _normalize_http_tool_prefix(runtime_config.streamable_http_path)
+    scoped_prefixes = tuple(
+        f"{scoped_prefix}{prefix}" if prefix else scoped_prefix
+        for prefix in base_prefixes
+    )
+    return tuple(dict.fromkeys((*base_prefixes, *scoped_prefixes)))
+
+
+def _default_http_tool_paths(server, tool_name: str) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}/{tool_name}" if prefix else f"/{tool_name}"
+        for prefix in _http_tool_route_prefixes(server)
+    )
+
+
+def _http_tool_registry_paths(server) -> tuple[str, ...]:
+    return tuple(
+        f"{prefix}/tool_registry" if prefix else "/tool_registry"
+        for prefix in _http_tool_route_prefixes(server)
+    )
+
+
+def _http_mirror_registry(server) -> dict[str, _HTTPToolMirror]:
+    registry = getattr(server, "_spectral_http_tool_mirrors", None)
+    if registry is None:
+        registry = {}
+        setattr(server, "_spectral_http_tool_mirrors", registry)
+    return registry
+
+
+def _register_http_mirror(
+    server,
+    tool_name: str,
+    *,
+    path: str | None = None,
+    methods: tuple[str, ...] = ("GET", "POST"),
+) -> None:
+    registry = _http_mirror_registry(server)
+    if path is None:
+        resolved_paths = _default_http_tool_paths(server, tool_name)
+    else:
+        resolved_path = str(path)
+        if not resolved_path.startswith("/"):
+            resolved_path = f"/{resolved_path}"
+        resolved_paths = (resolved_path,)
+    registry[tool_name] = _HTTPToolMirror(
+        tool_name=tool_name,
+        paths=resolved_paths,
+        methods=tuple(method.upper() for method in methods),
+    )
+
+
+def _http_mirror_manifest(server) -> list[dict[str, Any]]:
+    tool_manager = getattr(server, "_tool_manager", None)
+    if tool_manager is None:
+        return [
+            {
+                "tool": mirror.tool_name,
+                "paths": list(mirror.paths),
+                "methods": list(mirror.methods),
+            }
+            for mirror in _http_mirror_registry(server).values()
+        ]
+    mirrors = _http_mirror_registry(server)
+    manifest: list[dict[str, Any]] = []
+    for tool in tool_manager.list_tools():
+        mirror = mirrors.get(tool.name)
+        paths = _default_http_tool_paths(server, tool.name) if mirror is None else mirror.paths
+        methods = ("GET", "POST") if mirror is None else mirror.methods
+        manifest.append(
+            {
+                "tool": tool.name,
+                "paths": list(paths),
+                "methods": list(methods),
+            }
+        )
+    return manifest
+
+
+def _http_tool_meta(server, tool_name: str, methods: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "http_bridge": {
+            "paths": list(_default_http_tool_paths(server, tool_name)),
+            "methods": list(methods),
+            "registry_paths": list(_http_tool_registry_paths(server)),
+        }
+    }
+
+
+def _resolve_http_tool_name(server, tool_name: str) -> str | None:
+    candidate = str(tool_name).strip()
+    if not candidate:
+        return None
+    if getattr(server, "_tool_manager", None) is None:
+        return None
+    tool = server._tool_manager.get_tool(candidate)
+    if tool is None:
+        return None
+    return candidate
+
+
+def _merge_http_argument(arguments: dict[str, Any], key: str, value: Any) -> None:
+    existing = arguments.get(key)
+    if existing is None:
+        arguments[key] = value
+        return
+    if isinstance(existing, list):
+        existing.append(value)
+        return
+    arguments[key] = [existing, value]
+
+
+async def _collect_http_tool_arguments(request) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    for key, value in request.query_params.multi_items():
+        _merge_http_argument(arguments, str(key), value)
+    if request.method.upper() != "POST":
+        return arguments
+    body = await request.body()
+    if not body:
+        return arguments
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError("HTTP tool bridge expects a JSON object body for POST requests.") from exc
+    if payload is None:
+        return arguments
+    if not isinstance(payload, dict):
+        raise ValueError("HTTP tool bridge expects a JSON object body for POST requests.")
+    if isinstance(payload.get("arguments"), dict) and set(payload).issubset({"tool", "name", "arguments"}):
+        payload = payload["arguments"]
+    for key, value in payload.items():
+        arguments[str(key)] = value
+    return arguments
+
+
+async def _dispatch_http_tool_request(server, tool_name: str, request, *, requested_path: str):
+    from mcp.server.fastmcp.exceptions import ToolError
+    from starlette.responses import JSONResponse
+
+    resolved_tool_name = _resolve_http_tool_name(server, tool_name)
+    if resolved_tool_name is None:
+        return JSONResponse(
+            {
+                "error": True,
+                "error_type": "ToolNotFound",
+                "error_message": f"Unknown HTTP tool bridge target: {tool_name}",
+                "tool": tool_name,
+                "requested_path": requested_path,
+                "registry_paths": list(_http_tool_registry_paths(server)),
+            },
+            status_code=404,
+        )
+    try:
+        arguments = await _collect_http_tool_arguments(request)
+        result = await server._tool_manager.call_tool(resolved_tool_name, arguments)
+    except ToolError as exc:
+        return JSONResponse(_tool_error_payload(resolved_tool_name, exc), status_code=400)
+    except ValueError as exc:
+        return JSONResponse(_tool_error_payload(resolved_tool_name, exc), status_code=400)
+    payload = to_serializable(result)
+    if isinstance(payload, dict) and "http_bridge" not in payload:
+        payload = dict(payload)
+        payload["http_bridge"] = {
+            "tool": resolved_tool_name,
+            "requested_path": requested_path,
+            "paths": list(_default_http_tool_paths(server, resolved_tool_name)),
+            "methods": ["GET", "POST"],
+            "registry_paths": list(_http_tool_registry_paths(server)),
+        }
+    return JSONResponse(payload)
+
+
+def _install_http_tool_mirrors(server) -> None:
+    if getattr(server, "_spectral_http_tool_mirrors_installed", False):
+        return
+    mirrors = tuple(_http_mirror_registry(server).values())
+    if not mirrors:
+        setattr(server, "_spectral_http_tool_mirrors_installed", True)
+        return
+
+    from starlette.responses import JSONResponse
+
+    for mirror in mirrors:
+        for index, path in enumerate(mirror.paths):
+            async def _http_mirror_handler(request, *, _mirror: _HTTPToolMirror = mirror, _path: str = path):
+                return await _dispatch_http_tool_request(server, _mirror.tool_name, request, requested_path=_path)
+
+            server.custom_route(
+                path,
+                methods=list(mirror.methods),
+                name=f"http_tool_{mirror.tool_name}_{index}",
+                include_in_schema=True,
+            )(_http_mirror_handler)
+
+    for index, path in enumerate(_http_tool_registry_paths(server)):
+        @server.custom_route(path, methods=["GET", "POST"], name=f"tool_registry_{index}", include_in_schema=True)
+        async def http_tool_registry(_request) -> Any:
+            return JSONResponse({"tools": _http_mirror_manifest(server), "registry_paths": list(_http_tool_registry_paths(server))})
+
+    for index, prefix in enumerate(_http_tool_route_prefixes(server)):
+        dynamic_path = f"{prefix}/{{tool_name}}" if prefix else "/{tool_name}"
+
+        @server.custom_route(dynamic_path, methods=["GET", "POST"], name=f"http_tool_dynamic_{index}", include_in_schema=False)
+        async def http_tool_dynamic(request, *, _prefix: str = prefix) -> Any:
+            tool_name = str(request.path_params.get("tool_name", "")).strip()
+            requested_path = f"{_prefix}/{tool_name}" if _prefix else f"/{tool_name}"
+            return await _dispatch_http_tool_request(server, tool_name, request, requested_path=requested_path)
+
+    setattr(server, "_spectral_http_tool_mirrors_installed", True)
+
+
 def _run_sql_profile_workflow(
     workflow_fn,
     artifact_writer,
@@ -158,6 +617,7 @@ def _run_sql_profile_workflow(
     device: str = "auto",
     time_column: str = "time",
     position_columns: list[str] | None = None,
+    position_values: list[float] | None = None,
     sort_by_time: bool = False,
     normalize_each_profile: bool = False,
     parameters: dict[str, Any] | None = None,
@@ -172,6 +632,7 @@ def _run_sql_profile_workflow(
         parameters=params,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         num_modes=num_modes,
         device=device,
@@ -186,6 +647,7 @@ def _run_sql_profile_workflow(
             parameters=params,
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
         )
         artifact_writer(output_dir, summary, metadata=metadata)
@@ -225,8 +687,10 @@ def _audit_log(config: MCPServerConfig, operation: str, target: str, **extra: An
 _LOCAL_PATH_PREFIXES = ("/home/", "/tmp/", "/Users/", "/var/", "C:\\", "D:\\")
 
 
-def _check_not_local_path(path: str, tool_name: str) -> None:
+def _check_not_local_path(path: str, tool_name: str, config: MCPServerConfig | None = None) -> None:
     """Raise a helpful error if *path* looks like a client-local path."""
+    if config is not None and config.transport == "stdio":
+        return
     for prefix in _LOCAL_PATH_PREFIXES:
         if path.startswith(prefix):
             scratch_hint = (
@@ -239,6 +703,26 @@ def _check_not_local_path(path: str, tool_name: str) -> None:
             raise FileNotFoundError(
                 f"{tool_name}: path {path!r} looks like a client-local path. {scratch_hint}"
             )
+
+
+def _load_profile_table_tool_input(
+    table_path: str,
+    *,
+    config: MCPServerConfig,
+    tool_name: str,
+    time_column: str = "time",
+    position_columns: list[str] | None = None,
+    position_values: list[float] | None = None,
+    sort_by_time: bool = False,
+):
+    _check_not_local_path(table_path, tool_name, config)
+    return load_profile_table(
+        table_path,
+        time_column=time_column,
+        position_columns=position_columns,
+        position_values=position_values,
+        sort_by_time=sort_by_time,
+    )
 
 
 def _validate_synthetic_generation_request(config: MCPServerConfig, *, num_profiles: int, grid_points: int) -> None:
@@ -315,6 +799,8 @@ class _MCPExecutionController:
         # Rate limiter: sliding window of call timestamps
         self._call_timestamps: collections.deque[float] = collections.deque()
         self._rate_lock = Lock()
+        # Write-specific rate limiter (stricter)
+        self._write_limiter = WriteRateLimiter(config.write_rate_limit_per_minute)
 
     def check_rate_limit(self) -> None:
         """Enforce per-minute rate limit across all tool calls."""
@@ -369,8 +855,73 @@ def _tool_error_payload(tool_name: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-def _tool(server, runtime: _MCPExecutionController, name: str, description: str, *, bounded: bool = False):
+def _catalog_for_server(server) -> ToolCatalog | None:
+    return getattr(server, "_spectral_tool_catalog", None)
+
+
+def _tool_catalog_fingerprint(server) -> tuple[int, str | None]:
+    catalog = _catalog_for_server(server)
+    if catalog is None:
+        return 0, None
+    tool_names = tuple(sorted(catalog._descriptors))  # Internal use inside the MCP module.
+    if not tool_names:
+        return 0, None
+    digest = hashlib.sha256("\n".join(tool_names).encode("utf-8")).hexdigest()[:12]
+    return len(tool_names), digest
+
+
+def _http_bridge_fingerprint(server) -> tuple[int, str | None]:
+    manifest = _http_mirror_manifest(server)
+    if not manifest:
+        return 0, None
+    tokens = []
+    for entry in manifest:
+        tool = str(entry["tool"])
+        paths = tuple(str(path) for path in entry["paths"])
+        tokens.append(f"{tool}:{'|'.join(paths)}")
+    digest = hashlib.sha256("\n".join(sorted(tokens)).encode("utf-8")).hexdigest()[:12]
+    return len(manifest), digest
+
+
+def _augment_tool_payload(server, tool_name: str, payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    if "related_tools" in payload:
+        return payload
+    catalog = _catalog_for_server(server)
+    related_tools = () if catalog is None else catalog.related_tools(tool_name)
+    enriched = dict(payload)
+    enriched["related_tools"] = list(related_tools)
+    return enriched
+
+
+def _tool(
+    server,
+    runtime: _MCPExecutionController,
+    name: str,
+    description: str,
+    *,
+    bounded: bool = False,
+    intent_phrases: tuple[str, ...] = (),
+    http_mirror: bool = True,
+):
     def decorator(function):
+        catalog = _catalog_for_server(server)
+        resolved_description = description
+        tool_meta = None
+        if catalog is not None:
+            catalog.register(
+                name,
+                description,
+                function,
+                bounded=bounded,
+                intent_phrases=intent_phrases,
+            )
+            resolved_description = catalog.describe(name, description)
+        if http_mirror:
+            _register_http_mirror(server, name)
+            tool_meta = _http_tool_meta(server, name, ("GET", "POST"))
+
         @wraps(function)
         def wrapped(*args, **kwargs):
             # Rate limiting — applies to every tool call
@@ -390,22 +941,23 @@ def _tool(server, runtime: _MCPExecutionController, name: str, description: str,
             ) as _task_id:
                 try:
                     if not bounded:
-                        return function(*args, **kwargs)
+                        return _augment_tool_payload(server, name, function(*args, **kwargs))
                     slot_info = runtime.acquire()
                     try:
                         result = function(*args, **kwargs)
                         if isinstance(result, dict) and bounded:
                             result["_execution"] = slot_info
-                        return result
+                        return _augment_tool_payload(server, name, result)
                     finally:
                         runtime.release()
                 except Exception as exc:
                     mark_service_task_failed(_task_id, exc)
-                    return _tool_error_payload(name, exc)
+                    return _augment_tool_payload(server, name, _tool_error_payload(name, exc))
 
         return server.tool(
             name=name,
-            description=description,
+            description=resolved_description,
+            meta=tool_meta,
             structured_output=True,
         )(wrapped)
 
@@ -434,22 +986,82 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         streamable_http_path=runtime_config.streamable_http_path,
         transport_security=_build_transport_security_settings(runtime_config),
     )
+    server._spectral_runtime_config = runtime_config
+    server._spectral_tool_catalog = ToolCatalog()
+    server._spectral_http_tool_mirrors = {}
+    server._spectral_http_tool_prefixes = _HTTP_TOOL_ROUTE_PREFIXES
 
-    @_tool(server, runtime, "inspect_product", "Return engine identity: version, basis family, supported domains, and registered workflow map.")
+    @_tool(
+        server,
+        runtime,
+        "inspect_product",
+        "Return engine identity: version, basis family, supported domains, and registered workflow map.",
+        intent_phrases=(
+            "the user asks what this engine is for",
+            "the user needs the product spine or workflow map before choosing a tool",
+        ),
+    )
     def inspect_product_tool() -> dict[str, Any]:
         return to_serializable(inspect_product_identity())
 
-    @_tool(server, runtime, "guide_workflow", "Recommend a workflow (report, inverse-fit, or feature-export) with sensible defaults for the given input kind and goal.")
+    @_tool(
+        server,
+        runtime,
+        "guide_workflow",
+        "Recommend a workflow (report, inverse-fit, or feature-export) with sensible defaults for the given input kind and goal.",
+        intent_phrases=(
+            "the user wants the default product-level path for report, inverse-fit, or feature-model work",
+            "the user needs workflow guidance before calling lower-level tools",
+        ),
+    )
     def guide_workflow_tool(input_kind: str = "profile-table-file", goal: str = "report") -> dict[str, Any]:
         return to_serializable(guide_workflow(surface="mcp", input_kind=input_kind, goal=goal))
 
-    @_tool(server, runtime, "inspect_environment", "Report CPU/GPU availability, PyTorch device selection, thread counts, and optional backend status (TensorFlow, JAX, SQL).")
+    @_tool(
+        server,
+        runtime,
+        "plan_experiment",
+        "Translate a short natural-language scientific intent into a structured MCP tool chain without filling parameter values.",
+        intent_phrases=(
+            "the user gives a short experiment intent and wants a tool chain",
+            "the caller wants ordering guidance but will choose parameters separately",
+        ),
+    )
+    def plan_experiment_tool(intent: str, max_steps: int = 4) -> dict[str, Any]:
+        catalog = _catalog_for_server(server)
+        if catalog is None:
+            return {
+                "intent": intent,
+                "anchor_tool": None,
+                "plan_steps": [],
+                "considered_tools": [],
+                "notes": ["Tool catalog is unavailable, so no plan could be generated."],
+            }
+        return catalog.plan(intent, max_steps=max_steps).to_dict()
+
+    @_tool(
+        server,
+        runtime,
+        "inspect_environment",
+        "Report CPU/GPU availability, PyTorch device selection, thread counts, and optional backend status (TensorFlow, JAX, SQL).",
+        intent_phrases=(
+            "the user asks whether the machine is ready for spectral compute",
+            "the caller needs backend or device availability before running heavy tools",
+        ),
+    )
     def inspect_environment_tool(device: str = "auto") -> dict[str, Any]:
         return to_serializable(inspect_environment(device))
 
-    @_tool(server, runtime, "inspect_mcp_runtime", "Report MCP transport config: host, port, allowed origins, bounded-execution concurrency limits, and log level.")
+    @_tool(
+        server,
+        runtime,
+        "inspect_mcp_runtime",
+        "Report MCP transport config: host, port, allowed origins, bounded-execution concurrency limits, and log level.",
+        http_mirror=True,
+    )
     def inspect_mcp_runtime_tool() -> dict[str, Any]:
-        report = to_serializable(inspect_mcp_runtime(runtime_config))
+        report = to_serializable(inspect_mcp_runtime(runtime_config, inspection_scope="running-instance"))
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
         report["security_limits"] = {
             "max_database_size_mb": runtime.config.max_database_size_mb,
             "max_scratch_databases": runtime.config.max_scratch_databases,
@@ -462,13 +1074,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "rate_limit_per_minute": runtime.config.rate_limit_per_minute,
             "current_scratch_databases": runtime.count_scratch_databases(),
         }
+        report["http_compatibility_routes"] = _http_mirror_manifest(server)
+        report["http_bridge_tool_count"] = http_bridge_tool_count
+        report["http_bridge_fingerprint"] = http_bridge_fingerprint
         return report
 
     @_tool(server, runtime, "inspect_service_status", "Report uptime, completed/failed task counts, and recent tool execution history with timing.")
     def inspect_service_status_tool() -> dict[str, Any]:
         return to_serializable(inspect_service_status())
 
-    @_tool(server, runtime, "validate_installation", "Check that core, file-IO, SQL, MCP, and ML surfaces are importable and report their status (stable/beta/experimental).")
+    @_tool(
+        server,
+        runtime,
+        "validate_installation",
+        "Check that core, file-IO, SQL, MCP, and ML surfaces are importable and report their status (stable/beta/experimental).",
+        http_mirror=True,
+    )
     def validate_installation_tool(device: str = "auto") -> dict[str, Any]:
         return to_serializable(validate_installation(device))
 
@@ -647,47 +1268,80 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "After loading, use query_database to verify your data, then proceed with analysis tools."
         )
 
-    @_tool(server, runtime, "simulate_packet", "Simulate a Gaussian wavepacket in the infinite-well basis: project onto modes, propagate in time, and return grid-space snapshots with energy conservation diagnostics.", bounded=True)
+    @_tool(server, runtime, "simulate_packet", "Simulate a bounded-domain state specification in the infinite-well basis. Supports Gaussian, plane-wave, windowed plane-wave, box-mode, spectral-coefficient, and sampled-wavefunction inputs; returns grid-space snapshots, interval traces, density-matrix diagnostics, and phase-space diagnostics.", bounded=True)
     def simulate_packet_tool(
         center: float = 0.30,
         width: float = 0.07,
         wavenumber: float = 25.0,
         phase: float = 0.0,
+        state: dict[str, Any] | None = None,
         times: list[float] | None = None,
+        interval: list[float] | None = None,
         num_modes: int = 128,
         quadrature_points: int = 4096,
         grid_points: int = 512,
         device: str = "auto",
         output_dir: str | None = None,
     ) -> dict[str, Any]:
-        summary = simulate_gaussian_packet(
-            center=center,
-            width=width,
-            wavenumber=wavenumber,
-            phase=phase,
-            times=times or [0.0, 1e-3, 5e-3],
-            num_modes=num_modes,
-            quadrature_points=quadrature_points,
-            grid_points=grid_points,
-            device=device,
-        )
+        evaluation_times = times or [0.0, 1e-3, 5e-3]
+        if state is None:
+            summary = simulate_gaussian_packet(
+                center=center,
+                width=width,
+                wavenumber=wavenumber,
+                phase=phase,
+                times=evaluation_times,
+                interval=interval,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                grid_points=grid_points,
+                device=device,
+            )
+        else:
+            family, prepared_state = _coerce_tool_state_spec(
+                state,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                device=device,
+            )
+            if family in {"gaussian", "plane_wave", "windowed_plane_wave"}:
+                summary = simulate_packet_state(
+                    prepared_state,
+                    times=evaluation_times,
+                    interval=interval,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    grid_points=grid_points,
+                    device=device,
+                )
+            else:
+                summary = simulate_spectral_state(
+                    prepared_state,
+                    times=evaluation_times,
+                    interval=interval,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    grid_points=grid_points,
+                    device=device,
+                )
         if output_dir is not None:
             write_forward_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "project_packet", "Project a Gaussian wavepacket onto the infinite-well sine basis and return modal coefficients, projection quality, and grid-space reconstruction.", bounded=True)
+    @_tool(server, runtime, "project_packet", "Project a bounded-domain state specification onto the infinite-well sine basis and return modal coefficients, projection quality, density-matrix diagnostics, and phase-space diagnostics. Supports Gaussian, plane-wave, windowed plane-wave, box-mode, spectral-coefficient, and sampled-wavefunction inputs.", bounded=True)
     def project_packet_tool(
         center: float = 0.30,
         width: float = 0.07,
         wavenumber: float = 25.0,
         phase: float = 0.0,
+        state: dict[str, Any] | None = None,
         num_modes: int = 128,
         quadrature_points: int = 4096,
         grid_points: int = 2048,
         device: str = "auto",
     ) -> dict[str, Any]:
-        return to_serializable(
-            project_gaussian_packet(
+        if state is None:
+            summary = project_gaussian_packet(
                 center=center,
                 width=width,
                 wavenumber=wavenumber,
@@ -697,12 +1351,97 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 grid_points=grid_points,
                 device=device,
             )
+        else:
+            family, prepared_state = _coerce_tool_state_spec(
+                state,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                device=device,
+            )
+            if family in {"gaussian", "plane_wave", "windowed_plane_wave"}:
+                summary = project_packet_state(
+                    prepared_state,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    grid_points=grid_points,
+                    device=device,
+                )
+            elif family == "sampled_wavefunction":
+                summary = _project_sampled_wavefunction_from_spec(
+                    _coerce_parameters(state),
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    device=device,
+                )
+            else:
+                summary = project_spectral_state(
+                    prepared_state,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    device=device,
+                )
+        return to_serializable(summary)
+
+    @_tool(
+        server,
+        runtime,
+        "compare_box_states",
+        "Compare multiple bounded-domain state specifications in one call. Supports Gaussian, plane-wave, windowed plane-wave, box-mode, spectral-coefficient, and sampled-wavefunction inputs; returns per-state forward diagnostics plus pairwise fidelity, trace distance, momentum, and uncertainty comparisons.",
+        bounded=True,
+    )
+    def compare_box_states_tool(
+        states: list[dict[str, Any]],
+        times: list[float] | None = None,
+        interval: list[float] | None = None,
+        num_modes: int = 128,
+        quadrature_points: int = 4096,
+        grid_points: int = 512,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        if len(states) < 2:
+            raise ValueError("compare_box_states requires at least two state specifications")
+        prepared_states: list[tuple[str, Any]] = []
+        for index, raw_spec in enumerate(states):
+            if not isinstance(raw_spec, dict):
+                raise ValueError("each state specification must be a JSON object")
+            label = _tool_state_label(raw_spec, index)
+            _, prepared_state = _coerce_tool_state_spec(
+                raw_spec,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                device=device,
+            )
+            prepared_states.append((label, prepared_state))
+        summary = compare_state_trajectories(
+            prepared_states,
+            times=times or [0.0, 1e-3, 5e-3],
+            interval=interval,
+            num_modes=num_modes,
+            quadrature_points=quadrature_points,
+            grid_points=grid_points,
+            device=device,
         )
+        return to_serializable(summary)
 
     @_tool(server, runtime, "inspect_profile_table", "Load a profile table file FROM THE SERVER and report its grid dimensions, time slices, value ranges, and readiness for modal decomposition. If your data is local, use write_scratch_file first to upload it.")
-    def inspect_profile_table_tool(table_path: str, device: str = "auto") -> dict[str, Any]:
-        _check_not_local_path(table_path, "inspect_profile_table")
-        return to_serializable(summarize_profile_table(load_profile_table(table_path), device=device))
+    def inspect_profile_table_tool(
+        table_path: str,
+        device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
+    ) -> dict[str, Any]:
+        table = _load_profile_table_tool_input(
+            table_path,
+            config=runtime.config,
+            tool_name="inspect_profile_table",
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
+        return to_serializable(summarize_profile_table(table, device=device))
 
     @_tool(server, runtime, "profile_table_report", "Full pipeline on a profile table file FROM THE SERVER: inspect, decompose into modal basis, compress, return a unified report. If your data is local, use write_scratch_file first to upload it.", bounded=True)
     def profile_table_report_tool(
@@ -711,11 +1450,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         compress_num_modes: int = DEFAULT_PROFILE_REPORT_COMPRESS_NUM_MODES,
         device: str = "auto",
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
-        _check_not_local_path(table_path, "profile_table_report")
-        report = load_profile_table_report(
+        table = _load_profile_table_tool_input(
             table_path,
+            config=runtime.config,
+            tool_name="profile_table_report",
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
+        report = build_profile_table_report(
+            table,
             analyze_num_modes=analyze_num_modes,
             compress_num_modes=compress_num_modes,
             device=device,
@@ -736,11 +1487,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         normalize_each_profile: bool = False,
         include: list[str] | None = None,
         format: str = "csv",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         requested_includes = {"coefficients", "moments"} if not include else set(include)
         summary = export_feature_table_from_profile_table(
-            table_path,
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="export_feature_table",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             num_modes=num_modes,
             device=device,
             normalize_each_profile=normalize_each_profile,
@@ -761,16 +1524,194 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def inspect_tabular_dataset_tool(dataset_path: str) -> dict[str, Any]:
         return to_serializable(summarize_tabular_dataset(load_tabular_dataset(dataset_path)))
 
+    @_tool(
+        server,
+        runtime,
+        "derive_urban_microclimate",
+        "Run an explicit boundary-layer, radiative-transfer, and human thermal-response closure over a tabular weather dataset already available on the server. "
+        "Use a named mapping profile such as 'open-meteo' or pass explicit source column names so the physical alignment stays inspectable.",
+    )
+    def derive_urban_microclimate_tool(
+        dataset_path: str,
+        mapping_profile: str | None = None,
+        air_temperature_column: str | None = None,
+        relative_humidity_column: str | None = None,
+        wind_speed_column: str | None = None,
+        pressure_column: str | None = "surface_pressure",
+        shortwave_radiation_column: str | None = None,
+        longwave_radiation_column: str | None = None,
+        measurement_height_m: float = 10.0,
+        zero_plane_displacement_m: float = 0.0,
+        roughness_length_m: float = 0.8,
+        thermal_roughness_length_m: float = 0.1,
+        min_wind_speed_m_s: float = 0.1,
+        reference_pressure_pa: float = 101325.0,
+        shortwave_absorptivity: float = 0.7,
+        longwave_emissivity: float = 0.97,
+        shortwave_projected_area_factor: float = 0.7,
+        sky_view_factor: float = 1.0,
+        skin_temperature_c: float = 33.0,
+        clothing_insulation_clo: float = 0.7,
+        metabolic_heat_flux_w_m2: float = 80.0,
+        output_filename: str | None = "urban_microclimate.csv",
+    ) -> dict[str, Any]:
+        runtime._write_limiter.check("derive_urban_microclimate")
+        if output_filename is not None:
+            sanitize_filename(output_filename)
+            scratch_dir = _managed_scratch_directory(runtime.config)
+            check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+            check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
+        result = derive_urban_microclimate_from_tabular_dataset(
+            dataset_path,
+            mapping_profile=mapping_profile,
+            air_temperature_column=air_temperature_column,
+            relative_humidity_column=relative_humidity_column,
+            wind_speed_column=wind_speed_column,
+            pressure_column=pressure_column,
+            shortwave_radiation_column=shortwave_radiation_column,
+            longwave_radiation_column=longwave_radiation_column,
+            boundary_layer=UrbanBoundaryLayerConfig(
+                measurement_height_m=measurement_height_m,
+                zero_plane_displacement_m=zero_plane_displacement_m,
+                roughness_length_m=roughness_length_m,
+                thermal_roughness_length_m=thermal_roughness_length_m,
+                min_wind_speed_m_s=min_wind_speed_m_s,
+                reference_pressure_pa=reference_pressure_pa,
+            ),
+            radiative_transfer=UrbanRadiativeTransferConfig(
+                shortwave_absorptivity=shortwave_absorptivity,
+                longwave_emissivity=longwave_emissivity,
+                shortwave_projected_area_factor=shortwave_projected_area_factor,
+                sky_view_factor=sky_view_factor,
+            ),
+            human_thermal_response=HumanThermalResponseConfig(
+                skin_temperature_c=skin_temperature_c,
+                clothing_insulation_clo=clothing_insulation_clo,
+                metabolic_heat_flux_w_m2=metabolic_heat_flux_w_m2,
+            ),
+        )
+        payload: dict[str, Any] = {
+            "summary": to_serializable(result.summary),
+            "mapping": to_serializable(result.mapping),
+            "boundary_layer": to_serializable(result.boundary_layer),
+            "radiative_transfer": to_serializable(result.radiative_transfer),
+            "human_thermal_response": to_serializable(result.human_thermal_response),
+        }
+        if output_filename is not None:
+            output_path = _managed_scratch_path(runtime.config, output_filename)
+            save_tabular_dataset(result.dataset, output_path)
+            _audit_log(runtime.config, "DERIVE_URBAN_MICROCLIMATE", output_filename, kind="dataset")
+            payload["dataset_path"] = str(output_path)
+        return payload
+
+    @_tool(
+        server,
+        runtime,
+        "ingest_open_meteo_hourly_dataset",
+        "Fetch hourly Open-Meteo data into the shared tabular contract and optionally materialize selected variables into a profile table. "
+        "By default this writes the normalized dataset to the managed scratch directory so downstream tools can consume it immediately.",
+        bounded=True,
+    )
+    def ingest_open_meteo_hourly_dataset_tool(
+        latitude: float,
+        longitude: float,
+        start_date: str,
+        end_date: str,
+        hourly_variables: list[str],
+        api_kind: str = "auto",
+        timezone_name: str = "GMT",
+        models: list[str] | None = None,
+        temperature_unit: str | None = None,
+        wind_speed_unit: str | None = None,
+        precipitation_unit: str | None = None,
+        cell_selection: str | None = None,
+        elevation: float | None = None,
+        timeout_seconds: float = 30.0,
+        dataset_filename: str | None = "open_meteo_hourly.csv",
+        profile_filename: str | None = None,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
+    ) -> dict[str, Any]:
+        runtime._write_limiter.check("ingest_open_meteo_hourly_dataset")
+        if dataset_filename is not None:
+            sanitize_filename(dataset_filename)
+        if profile_filename is not None:
+            sanitize_filename(profile_filename)
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
+        result = ingest_open_meteo_hourly_dataset(
+            latitude=latitude,
+            longitude=longitude,
+            start_date=start_date,
+            end_date=end_date,
+            hourly_variables=hourly_variables,
+            api_kind=api_kind,
+            timezone_name=timezone_name,
+            models=models,
+            temperature_unit=temperature_unit,
+            wind_speed_unit=wind_speed_unit,
+            precipitation_unit=precipitation_unit,
+            cell_selection=cell_selection,
+            elevation=elevation,
+            timeout_seconds=timeout_seconds,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
+        if profile_filename is not None and result.profile_table is None:
+            raise ValueError("profile_filename requires explicit profile-table materialization arguments")
+        payload: dict[str, Any] = {
+            "api_kind": result.api_kind,
+            "request_url": result.request_url,
+            "latitude": result.latitude,
+            "longitude": result.longitude,
+            "elevation": result.elevation,
+            "timezone": result.timezone,
+            "utc_offset_seconds": result.utc_offset_seconds,
+            "hourly_variables": list(result.hourly_variables),
+            "hourly_units": dict(result.hourly_units),
+            "dataset": to_serializable(result.dataset_summary),
+            "profile_materialization": to_serializable(result.profile_materialization),
+            "profile_table": to_serializable(result.profile_summary),
+        }
+        if dataset_filename is not None:
+            dataset_path = _managed_scratch_path(runtime.config, dataset_filename)
+            save_tabular_dataset(result.dataset, dataset_path)
+            _audit_log(runtime.config, "INGEST_OPEN_METEO", dataset_filename, kind="dataset")
+            payload["dataset_path"] = str(dataset_path)
+        if profile_filename is not None:
+            profile_path = _managed_scratch_path(runtime.config, profile_filename)
+            save_profile_table(result.profile_table, profile_path)
+            _audit_log(runtime.config, "INGEST_OPEN_METEO", profile_filename, kind="profile-table")
+            payload["profile_path"] = str(profile_path)
+        return payload
+
     @_tool(server, runtime, "analyze_profile_table", "Decompose a profile table file into its infinite-well modal basis and report per-mode energy, convergence rate, and truncation diagnostics.", bounded=True)
     def analyze_profile_table_tool(
         table_path: str,
         num_modes: int = 32,
         device: str = "auto",
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = analyze_profile_table_spectra(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="analyze_profile_table",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             num_modes=num_modes,
             device=device,
             normalize_each_profile=normalize_each_profile,
@@ -785,10 +1726,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         num_modes: int = 32,
         device: str = "auto",
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = compress_profile_table(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="compress_profile_table",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             num_modes=num_modes,
             device=device,
             normalize_each_profile=normalize_each_profile,
@@ -803,10 +1756,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         mode_counts: list[int] | None = None,
         device: str = "auto",
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = sweep_profile_table_compression(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="compression_sweep",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             mode_counts=mode_counts or [4, 8, 16, 32],
             device=device,
             normalize_each_profile=normalize_each_profile,
@@ -827,10 +1792,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         steps: int = 200,
         learning_rate: float = 0.05,
         device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = fit_gaussian_packet_to_profile_table(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="fit_packet_to_profile_table",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             initial_guess={
                 "center": center,
                 "width": width,
@@ -1020,7 +1997,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         width: float = 0.07,
         wavenumber: float = 25.0,
         phase: float = 0.0,
-        objective: str = "target_position",
+        objective: str = "position",
         target_value: float = 0.60,
         final_time: float = 0.01,
         interval: list[float] | None = None,
@@ -1053,7 +2030,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_differentiable_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "transport_workflow", "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "transport_workflow",
+        "Run the barrier/resonance vertical workflow that combines scattering, WKB comparison, propagation, and Wigner diagnostics.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants an end-to-end tunneling, barrier, or resonance analysis",
+            "the caller wants the transport bundle instead of manually chaining scattering and propagation tools",
+        ),
+    )
     def transport_workflow_tool(
         barrier_height: float = 50.0,
         barrier_width_sigma: float = 0.03,
@@ -1083,7 +2070,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             write_vertical_workflow_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "profile_inference_workflow", "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "profile_inference_workflow",
+        "Run the report-first scientific tabular vertical: summarize, inverse-fit with uncertainty, and export spectral features from one profile table.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants report, inverse reconstruction, and feature export on the same profile table",
+            "the caller wants one tabular-science workflow instead of separate report and inverse steps",
+        ),
+    )
     def profile_inference_workflow_tool(
         table_path: str,
         center: float = 0.36,
@@ -1097,10 +2094,22 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         quadrature_points: int = 2048,
         normalize_each_profile: bool = False,
         device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = run_profile_inference_workflow(
-            table_path,
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="profile_inference_workflow",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             initial_guess={
                 "center": center,
                 "width": width,
@@ -1124,11 +2133,31 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         reference_table_path: str,
         candidate_table_path: str,
         device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = compare_profile_tables(
-            load_profile_table(reference_table_path),
-            load_profile_table(candidate_table_path),
+            _load_profile_table_tool_input(
+                reference_table_path,
+                config=runtime.config,
+                tool_name="compare_profile_tables",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
+            _load_profile_table_tool_input(
+                candidate_table_path,
+                config=runtime.config,
+                tool_name="compare_profile_tables",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             device=device,
         )
         if output_dir is not None:
@@ -1147,7 +2176,17 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def describe_database_table_tool(database: str, table_name: str) -> dict[str, Any]:
         return to_serializable(describe_database_table(database, table_name))
 
-    @_tool(server, runtime, "query_database", "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.", bounded=True)
+    @_tool(
+        server,
+        runtime,
+        "query_database",
+        "Run a read-only parameterized SQL query and return the result. Returns ALL rows by default (up to max_rows). Do NOT use bash/python/sqlite3 to access database files — always use this tool or export_query_csv instead.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants to inspect or retrieve rows from a managed database",
+            "the caller needs read-only SQL access without shelling into SQLite",
+        ),
+    )
     def query_database_tool(
         database: str,
         query: str,
@@ -1225,6 +2264,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         statement: str,
         parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("execute_database_statement")
+        check_sql_safety(statement, allow_destructive=runtime.config.allow_destructive_sql)
         from spectral_packet_engine.database import check_database_file_size
         result = to_serializable(
             execute_database_statement(
@@ -1243,6 +2284,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         database: str,
         script: str,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("execute_database_script")
+        check_sql_script_safety(script, allow_destructive=runtime.config.allow_destructive_sql)
         from spectral_packet_engine.database import check_database_file_size
         result = to_serializable(
             execute_database_script(
@@ -1265,7 +2308,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         dataset_path: str,
         if_exists: str = "fail",
     ) -> dict[str, Any]:
-        _check_not_local_path(dataset_path, "write_database_table")
+        runtime._write_limiter.check("write_database_table")
+        _check_not_local_path(dataset_path, "write_database_table", runtime.config)
+        if if_exists == "replace" and runtime.config.auto_backup_on_replace:
+            scratch_dir = _managed_scratch_directory(runtime.config)
+            backup_table_before_replace(database, table_name, scratch_dir)
         result = to_serializable(
             write_tabular_dataset_to_database(
                 database,
@@ -1385,6 +2432,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         device: str = "auto",
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         normalize_each_profile: bool = False,
         parameters: dict[str, Any] | None = None,
@@ -1396,7 +2444,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "sql-analyze-table",
             database, query,
             num_modes=num_modes, device=device, time_column=time_column,
-            position_columns=position_columns, sort_by_time=sort_by_time,
+            position_columns=position_columns, position_values=position_values, sort_by_time=sort_by_time,
             normalize_each_profile=normalize_each_profile,
             parameters=parameters, output_dir=output_dir,
         )
@@ -1409,6 +2457,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         device: str = "auto",
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         normalize_each_profile: bool = False,
         parameters: dict[str, Any] | None = None,
@@ -1420,7 +2469,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "sql-compress-table",
             database, query,
             num_modes=num_modes, device=device, time_column=time_column,
-            position_columns=position_columns, sort_by_time=sort_by_time,
+            position_columns=position_columns, position_values=position_values, sort_by_time=sort_by_time,
             normalize_each_profile=normalize_each_profile,
             parameters=parameters, output_dir=output_dir,
         )
@@ -1433,6 +2482,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         device: str = "auto",
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         normalize_each_profile: bool = False,
         include: list[str] | None = None,
@@ -1447,6 +2497,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             parameters=_coerce_parameters(parameters),
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
             num_modes=num_modes,
             device=device,
@@ -1466,6 +2517,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                     parameters=_coerce_parameters(parameters),
                     time_column=time_column,
                     position_columns=position_columns,
+                    position_values=position_values,
                     sort_by_time=sort_by_time,
                 ),
             )
@@ -1481,6 +2533,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         device: str = "auto",
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         normalize_each_profile: bool = False,
         parameters: dict[str, Any] | None = None,
@@ -1492,6 +2545,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             parameters=_coerce_parameters(parameters),
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
             analyze_num_modes=analyze_num_modes,
             compress_num_modes=compress_num_modes,
@@ -1508,6 +2562,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                     parameters=_coerce_parameters(parameters),
                     time_column=time_column,
                     position_columns=position_columns,
+                    position_values=position_values,
                     sort_by_time=sort_by_time,
                 ),
             )
@@ -1528,6 +2583,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         device: str = "auto",
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         parameters: dict[str, Any] | None = None,
         output_dir: str | None = None,
@@ -1544,6 +2600,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             },
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
             num_modes=num_modes,
             quadrature_points=quadrature_points,
@@ -1562,6 +2619,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                     parameters=_coerce_parameters(parameters),
                     time_column=time_column,
                     position_columns=position_columns,
+                    position_values=position_values,
                     sort_by_time=sort_by_time,
                 ),
             )
@@ -1612,11 +2670,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         epochs: int = 20,
         batch_size: int = 64,
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         export_dir: str | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = train_tensorflow_surrogate_on_profile_table(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="train_tensorflow_surrogate",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             num_modes=num_modes,
             normalize_each_profile=normalize_each_profile,
             config=TensorFlowRegressorConfig(
@@ -1636,11 +2706,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         epochs: int = 20,
         batch_size: int = 64,
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         export_dir: str | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = evaluate_tensorflow_surrogate_on_profile_table(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="evaluate_tensorflow_surrogate",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             num_modes=num_modes,
             normalize_each_profile=normalize_each_profile,
             config=TensorFlowRegressorConfig(
@@ -1661,11 +2743,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         epochs: int = 20,
         batch_size: int = 64,
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         export_dir: str | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = train_modal_surrogate_on_profile_table(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="train_modal_surrogate",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             backend=backend,
             num_modes=num_modes,
             normalize_each_profile=normalize_each_profile,
@@ -1687,11 +2781,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         epochs: int = 20,
         batch_size: int = 64,
         normalize_each_profile: bool = False,
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
         export_dir: str | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         summary = evaluate_modal_surrogate_on_profile_table(
-            load_profile_table(table_path),
+            _load_profile_table_tool_input(
+                table_path,
+                config=runtime.config,
+                tool_name="evaluate_modal_surrogate",
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            ),
             backend=backend,
             num_modes=num_modes,
             normalize_each_profile=normalize_each_profile,
@@ -1789,6 +2895,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         batch_size: int = 64,
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         normalize_each_profile: bool = False,
         parameters: dict[str, Any] | None = None,
@@ -1802,6 +2909,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             parameters=_coerce_parameters(parameters),
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
             num_modes=num_modes,
             normalize_each_profile=normalize_each_profile,
@@ -1822,6 +2930,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                     parameters=_coerce_parameters(parameters),
                     time_column=time_column,
                     position_columns=position_columns,
+                    position_values=position_values,
                     sort_by_time=sort_by_time,
                 ),
             )
@@ -1837,6 +2946,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         batch_size: int = 64,
         time_column: str = "time",
         position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
         sort_by_time: bool = False,
         normalize_each_profile: bool = False,
         parameters: dict[str, Any] | None = None,
@@ -1850,6 +2960,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             parameters=_coerce_parameters(parameters),
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
             num_modes=num_modes,
             normalize_each_profile=normalize_each_profile,
@@ -1870,6 +2981,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                     parameters=_coerce_parameters(parameters),
                     time_column=time_column,
                     position_columns=position_columns,
+                    position_values=position_values,
                     sort_by_time=sort_by_time,
                 ),
             )
@@ -1893,13 +3005,25 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         num_modes: int = 32,
         error_tolerance: float = 0.01,
         device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
     ) -> dict[str, Any]:
         from spectral_packet_engine.convergence import analyze_convergence as _analyze_convergence
         from spectral_packet_engine.domain import InfiniteWell1D
         from spectral_packet_engine.profiles import compress_profiles
         from spectral_packet_engine.runtime import resolve_torch_device
 
-        table = load_profile_table(table_path)
+        table = _load_profile_table_tool_input(
+            table_path,
+            config=runtime.config,
+            tool_name="analyze_convergence",
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
         resolved_device = resolve_torch_device(device)
         grid = torch.as_tensor(table.position_grid, dtype=torch.float64, device=resolved_device)
         profiles = torch.as_tensor(table.profiles, dtype=torch.float64, device=resolved_device)
@@ -1945,12 +3069,24 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         table_path: str,
         num_modes: int = 32,
         device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
     ) -> dict[str, Any]:
         import torch
         from spectral_packet_engine.energy import compute_energy_budget as _compute_budget
         from spectral_packet_engine.profiles import project_profiles_onto_basis
 
-        table = load_profile_table(table_path)
+        table = _load_profile_table_tool_input(
+            table_path,
+            config=runtime.config,
+            tool_name="compute_energy_budget",
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
         from spectral_packet_engine.runtime import resolve_torch_device
         resolved_device = resolve_torch_device(device)
         grid = torch.as_tensor(table.position_grid, dtype=torch.float64, device=resolved_device)
@@ -2098,6 +3234,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_quantum_state_pipeline",
         "Analyze a Gaussian wavepacket in the infinite-well basis: eigenexpansion, energy/momentum expectation values, Heisenberg uncertainty product, spectral entropy, convergence diagnostics, and Wigner function negativity.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a full quantum-state diagnostic from packet parameters",
+            "the caller wants one wavepacket analysis instead of separate energy, uncertainty, and Wigner calls",
+        ),
     )
     def analyze_quantum_state_pipeline_tool(
         center: float = 0.30,
@@ -2129,6 +3269,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_potential_pipeline",
         "Analyze a 1D potential (harmonic, double-well, Morse, or custom): compute eigenvalues, compare against WKB semiclassical approximation, evaluate partition function, spectral zeta, and Weyl asymptotic law.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a broad spectral characterization of a potential family",
+            "the caller wants eigenvalues, semiclassical checks, and thermodynamic diagnostics together",
+        ),
     )
     def analyze_potential_pipeline_tool(
         potential: str = "harmonic",
@@ -2164,6 +3308,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "analyze_scattering_pipeline",
         "Full scattering analysis: transmission spectrum, resonances, S-matrix, WKB tunneling comparison — energy range auto-determined from barrier heights.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a scattering or barrier transmission analysis without picking every subtool",
+            "the caller asks about resonances, transmission spectra, or tunneling through a barrier",
+        ),
     )
     def analyze_scattering_pipeline_tool(
         barrier_type: str = "double",
@@ -2191,12 +3339,24 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def analyze_spectral_profile_pipeline_tool(
         table_path: str,
         device: str = "auto",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
     ) -> dict[str, Any]:
         import torch
         from spectral_packet_engine.pipelines import analyze_spectral_profile
         from spectral_packet_engine.runtime import resolve_torch_device
 
-        table = load_profile_table(table_path)
+        table = _load_profile_table_tool_input(
+            table_path,
+            config=runtime.config,
+            tool_name="analyze_spectral_profile_pipeline",
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
         resolved = resolve_torch_device(device)
         grid = torch.as_tensor(table.position_grid, dtype=torch.float64, device=resolved)
         profiles = torch.as_tensor(table.profiles, dtype=torch.float64, device=resolved)
@@ -2289,6 +3449,368 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "orthonormality_ok": ortho["is_orthonormal"],
         })
 
+    # ================================================================
+    # Sparse Eigensolver & Many-Body Tools
+    # ================================================================
+
+    @_tool(
+        server,
+        runtime,
+        "solve_eigenproblem_sparse",
+        "Solve a large sparse Hamiltonian for its lowest eigenvalues using iterative methods. "
+        "Use when the matrix is too large for dense diagonalization, or when the Hamiltonian is "
+        "sparse (e.g. many-body, lattice, or CI problems). Supports Lanczos, LOBPCG, and Davidson backends.",
+        bounded=True,
+        intent_phrases=(
+            "the user wants sparse or iterative eigensolver",
+            "the user has a large Hamiltonian",
+            "the user asks about many-body eigenvalues",
+            "the user mentions Lanczos, LOBPCG, or Davidson",
+        ),
+    )
+    def solve_eigenproblem_sparse_tool(
+        potential: str = "harmonic",
+        num_points: int = 128,
+        num_states: int = 6,
+        method: str = "lanczos",
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        omega: float = 50.0,
+        tol: float = 1e-10,
+        max_iter: int = 0,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_dense,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.sparse_eigensolver import solve_eigenproblem_sparse as _solve_sparse
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        # Build dense H, then solve sparse
+        from spectral_packet_engine.basis import InfiniteWellBasis, eigenenergies, sine_basis_matrix
+        from spectral_packet_engine.domain import coerce_tensor
+        dtype = domain.real_dtype
+        N = num_points
+        modes = torch.arange(1, N + 1, dtype=dtype, device=resolved)
+        E_n = eigenenergies(domain, modes)
+        num_quad = max(4 * N, 512)
+        quad_grid = domain.grid(num_quad)
+        dx = quad_grid[1] - quad_grid[0]
+        V_vals = coerce_tensor(pot_fn(quad_grid), dtype=dtype, device=resolved)
+        B = sine_basis_matrix(domain, modes, quad_grid)
+        weights = torch.ones(num_quad, dtype=dtype, device=resolved) * dx
+        weights[0] /= 2.0
+        weights[-1] /= 2.0
+        V_mat = B.T @ ((V_vals * weights).unsqueeze(1) * B)
+        H = torch.diag(E_n) + V_mat
+
+        result = _solve_sparse(H, num_states=num_states, method=method, tol=tol, max_iter=max_iter)
+        return to_serializable({
+            "eigenvalues": result.eigenvalues.tolist(),
+            "num_states": result.num_states,
+            "method": result.method,
+            "converged": result.converged,
+            "iterations": result.iterations,
+            "sparsity": result.sparsity,
+            "potential": potential,
+        })
+
+    @_tool(
+        server,
+        runtime,
+        "build_fock_space",
+        "Construct the Fock space for N fermions in M single-particle orbitals. "
+        "Enumerates all valid Slater determinant configurations and returns "
+        "the Hilbert space dimension and configuration summary. "
+        "Use when the user asks about many-body quantum systems, occupation numbers, "
+        "or wants to set up a configuration-interaction calculation.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about Fock space or many-body states",
+            "the user wants to enumerate Slater determinants",
+            "the user asks about occupation numbers or CI configurations",
+        ),
+    )
+    def build_fock_space_tool(
+        num_orbitals: int = 6,
+        num_particles: int = 3,
+    ) -> dict[str, Any]:
+        from spectral_packet_engine.many_body import build_fock_space as _build
+
+        fock = _build(num_orbitals, num_particles)
+        sample = [list(map(int, c)) for c in fock.configs[:min(10, fock.dim)]]
+        return to_serializable({
+            "num_orbitals": fock.num_orbitals,
+            "num_particles": fock.num_particles,
+            "hilbert_space_dim": fock.dim,
+            "sample_configurations": sample,
+            "total_configurations": fock.dim,
+        })
+
+    @_tool(
+        server,
+        runtime,
+        "build_many_body_hamiltonian",
+        "Assemble and diagonalize a many-body Hamiltonian for N fermions in M orbitals. "
+        "Builds creation/annihilation operators as sparse matrices, constructs the "
+        "full CI Hamiltonian H = Σ h_ij a†_i a_j + ½ Σ V_ijkl a†_i a†_j a_l a_k, "
+        "and solves for the lowest eigenvalues. "
+        "Use when the user asks about interacting fermions, CI calculations, "
+        "or many-body ground states.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about many-body Hamiltonian or CI",
+            "the user wants interacting fermion eigenvalues",
+            "the user asks about creation and annihilation operators",
+            "the user wants a second-quantization calculation",
+        ),
+    )
+    def build_many_body_hamiltonian_tool(
+        num_orbitals: int = 6,
+        num_particles: int = 3,
+        num_eigenstates: int = 4,
+        interaction_strength: float = 1.0,
+        potential: str = "harmonic",
+        omega: float = 50.0,
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        solver_method: str = "lanczos",
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_1p,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.many_body import (
+            build_fock_space as _build_fock,
+            compute_one_body_integrals,
+            compute_two_body_integrals,
+            build_many_body_hamiltonian as _build_mb,
+            hamiltonian_to_torch,
+        )
+        from spectral_packet_engine.sparse_eigensolver import solve_eigenproblem_sparse
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        # 1. Solve single-particle problem
+        sp_result = _solve_1p(pot_fn, domain, num_points=128, num_states=num_orbitals)
+
+        # 2. Build Fock space
+        fock = _build_fock(num_orbitals, num_particles)
+
+        # 3. Compute integrals
+        h1 = compute_one_body_integrals(fock, sp_result, domain)
+        h2 = compute_two_body_integrals(fock, sp_result.eigenstates, sp_result.grid)
+
+        # 4. Build many-body H
+        mb = _build_mb(fock, h1, h2, interaction_strength=interaction_strength)
+
+        # 5. Solve
+        H_torch = hamiltonian_to_torch(mb, device=str(resolved))
+        num_solve = min(num_eigenstates, fock.dim - 1)
+        if num_solve < 1:
+            return to_serializable({
+                "error": "Hilbert space too small for requested eigenstates",
+                "hilbert_space_dim": fock.dim,
+            })
+        sparse_result = solve_eigenproblem_sparse(H_torch, num_states=num_solve, method=solver_method)
+
+        return to_serializable({
+            "eigenvalues": sparse_result.eigenvalues.tolist(),
+            "num_states": sparse_result.num_states,
+            "method": sparse_result.method,
+            "converged": sparse_result.converged,
+            "hilbert_space_dim": fock.dim,
+            "num_orbitals": num_orbitals,
+            "num_particles": num_particles,
+            "interaction_strength": interaction_strength,
+            "sparsity": sparse_result.sparsity,
+            "potential": potential,
+        })
+
+    @_tool(
+        server,
+        runtime,
+        "jordan_wigner_transform",
+        "Map a fermionic Hamiltonian to a qubit Hamiltonian via Jordan-Wigner encoding. "
+        "Converts second-quantization operators (a†, a) into Pauli strings (X, Y, Z, I). "
+        "Use when the user asks about qubit Hamiltonians, quantum computing mappings, "
+        "VQE preparation, or fermion-to-qubit transformations.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about Jordan-Wigner transformation",
+            "the user wants a qubit Hamiltonian from fermions",
+            "the user asks about fermion-to-qubit mapping",
+            "the user wants to prepare a VQE Hamiltonian",
+        ),
+    )
+    def jordan_wigner_transform_tool(
+        num_orbitals: int = 4,
+        num_particles: int = 2,
+        potential: str = "harmonic",
+        omega: float = 50.0,
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        interaction_strength: float = 1.0,
+        include_two_body: bool = True,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_1p,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.many_body import (
+            build_fock_space as _build_fock,
+            compute_one_body_integrals,
+            compute_two_body_integrals,
+        )
+        from spectral_packet_engine.qubit_mapping import jordan_wigner_transform as _jw
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        sp_result = _solve_1p(pot_fn, domain, num_points=128, num_states=num_orbitals)
+        fock = _build_fock(num_orbitals, num_particles)
+        h1 = compute_one_body_integrals(fock, sp_result, domain)
+        h2 = compute_two_body_integrals(fock, sp_result.eigenstates, sp_result.grid) if include_two_body else None
+
+        qh = _jw(h1, h2, interaction_strength=interaction_strength)
+        result = qh.to_dict()
+        result["mapping"] = "jordan-wigner"
+        result["num_orbitals"] = num_orbitals
+        result["num_particles"] = num_particles
+        result["interaction_strength"] = interaction_strength
+        # Show top Pauli terms by magnitude
+        sorted_terms = sorted(result["terms"], key=lambda t: abs(t["coefficient_real"]) + abs(t["coefficient_imag"]), reverse=True)
+        result["top_terms"] = sorted_terms[:20]
+        result["terms"] = f"{len(sorted_terms)} terms (showing top 20)"
+        return to_serializable(result)
+
+    @_tool(
+        server,
+        runtime,
+        "bravyi_kitaev_transform",
+        "Map a fermionic Hamiltonian to a qubit Hamiltonian via Bravyi-Kitaev encoding. "
+        "Produces shorter Pauli Z-strings than Jordan-Wigner (O(log M) vs O(M)), "
+        "which translates to shallower quantum circuits. "
+        "Use when the user asks about BK encoding, efficient qubit mappings, "
+        "or wants to compare Jordan-Wigner vs Bravyi-Kitaev.",
+        bounded=True,
+        intent_phrases=(
+            "the user asks about Bravyi-Kitaev transformation",
+            "the user wants efficient qubit encoding",
+            "the user wants to compare JW and BK mappings",
+        ),
+    )
+    def bravyi_kitaev_transform_tool(
+        num_orbitals: int = 4,
+        num_particles: int = 2,
+        potential: str = "harmonic",
+        omega: float = 50.0,
+        domain_left: float = 0.0,
+        domain_right: float = 1.0,
+        interaction_strength: float = 1.0,
+        include_two_body: bool = True,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        import torch
+        from spectral_packet_engine.domain import InfiniteWell1D
+        from spectral_packet_engine.eigensolver import (
+            solve_eigenproblem as _solve_1p,
+            harmonic_potential,
+            double_well_potential,
+            morse_potential,
+            poschl_teller_potential,
+        )
+        from spectral_packet_engine.many_body import (
+            build_fock_space as _build_fock,
+            compute_one_body_integrals,
+            compute_two_body_integrals,
+        )
+        from spectral_packet_engine.qubit_mapping import bravyi_kitaev_transform as _bk
+        from spectral_packet_engine.runtime import resolve_torch_device
+
+        resolved = resolve_torch_device(device)
+        domain = InfiniteWell1D(
+            left=torch.tensor(domain_left, dtype=torch.float64, device=resolved),
+            right=torch.tensor(domain_right, dtype=torch.float64, device=resolved),
+        )
+        potentials = {
+            "harmonic": lambda x: harmonic_potential(x, omega=omega, domain=domain),
+            "double_well": lambda x: double_well_potential(x, a_param=500.0, b_param=50.0, domain=domain),
+            "morse": lambda x: morse_potential(x, D_e=20.0, alpha=6.0, x_eq=float(domain.midpoint)),
+            "poschl_teller": lambda x: poschl_teller_potential(x, V0=50.0, alpha=10.0, domain=domain),
+        }
+        pot_fn = potentials.get(potential, potentials["harmonic"])
+
+        sp_result = _solve_1p(pot_fn, domain, num_points=128, num_states=num_orbitals)
+        fock = _build_fock(num_orbitals, num_particles)
+        h1 = compute_one_body_integrals(fock, sp_result, domain)
+        h2 = compute_two_body_integrals(fock, sp_result.eigenstates, sp_result.grid) if include_two_body else None
+
+        qh = _bk(h1, h2, interaction_strength=interaction_strength)
+        result = qh.to_dict()
+        result["mapping"] = "bravyi-kitaev"
+        result["num_orbitals"] = num_orbitals
+        result["num_particles"] = num_particles
+        result["interaction_strength"] = interaction_strength
+        sorted_terms = sorted(result["terms"], key=lambda t: abs(t["coefficient_real"]) + abs(t["coefficient_imag"]), reverse=True)
+        result["top_terms"] = sorted_terms[:20]
+        result["terms"] = f"{len(sorted_terms)} terms (showing top 20)"
+        return to_serializable(result)
+
     @_tool(
         server,
         runtime,
@@ -2342,6 +3864,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "compute_wigner_function",
         "Compute the Wigner quasi-probability distribution W(x,p) for a Gaussian wavepacket. Returns negativity (non-classicality witness) and marginals.",
         bounded=True,
+        intent_phrases=(
+            "the user asks whether a state looks quantum or classical",
+            "the caller wants phase-space diagnostics, Wigner negativity, or non-classicality evidence",
+        ),
     )
     def compute_wigner_function_tool(
         center: float = 0.5,
@@ -2455,6 +3981,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "perturbation_analysis",
         "Apply quantum perturbation theory (1st and 2nd order) to analyze how a perturbation modifies energy levels of the infinite well.",
         bounded=True,
+        intent_phrases=(
+            "the user wants to see how a small perturbation changes energy levels",
+            "the caller asks whether perturbation theory is valid for a modified well",
+        ),
     )
     def perturbation_analysis_tool(
         perturbation_type: str = "linear_slope",
@@ -2500,6 +4030,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "wkb_analysis",
         "WKB semiclassical analysis: Bohr-Sommerfeld quantization and tunneling probability for 1D potentials.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a semiclassical comparison for spectra or tunneling",
+            "the caller asks for WKB, Bohr-Sommerfeld, or barrier transmission estimates",
+        ),
     )
     def wkb_analysis_tool(
         potential: str = "harmonic",
@@ -2684,6 +4218,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "scattering_analysis",
         "Compute quantum scattering through a potential barrier: transmission T(E), reflection R(E), resonances, and S-matrix unitarity.",
         bounded=True,
+        intent_phrases=(
+            "the user asks for transmission, reflection, or resonance structure through a barrier",
+            "the caller wants resolved scattering curves rather than a bundled workflow",
+        ),
     )
     def scattering_analysis_tool(
         barrier_type: str = "rectangular",
@@ -2722,6 +4260,10 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "berry_phase_analysis",
         "Compute the Berry (geometric) phase for a spin-½ system in a rotating magnetic field. Validates against the analytical solid-angle formula.",
         bounded=True,
+        intent_phrases=(
+            "the user asks about geometric phase, Berry phase, or adiabatic phase accumulation",
+            "the caller wants topology-style phase diagnostics for a closed parameter loop",
+        ),
     )
     def berry_phase_analysis_tool(
         theta: float = 0.6,
@@ -2832,6 +4374,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Returns a structured report with transmission coefficients, norm/energy conservation, "
         "and non-classicality witness.",
         bounded=True,
+        intent_phrases=(
+            "the user wants a complete tunneling analysis from a short intent",
+            "the caller wants scattering, WKB, propagation, and Wigner diagnostics chained automatically",
+        ),
+        http_mirror=True,
     )
     def tunneling_experiment_tool(
         barrier_height: float = 50.0,
@@ -3379,6 +4926,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         filename: str,
         content: str,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("write_scratch_file")
+        sanitize_filename(filename)
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
         max_size = 5 * 1024 * 1024  # 5 MB
         if len(content) > max_size:
             raise ValueError(
@@ -3471,9 +5023,13 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         csv_content: str,
         database: str = "data.db",
         table_name: str = "data",
-        if_exists: str = "replace",
+        if_exists: str = "fail",
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("upload_csv_to_database")
         from spectral_packet_engine.database import check_database_file_size
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
         max_size = 5 * 1024 * 1024
         if len(csv_content) > max_size:
             raise ValueError(
@@ -3484,6 +5040,9 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         csv_path = _managed_scratch_path(runtime.config, csv_filename)
         csv_path.write_text(csv_content, encoding="utf-8")
         db_path = _managed_scratch_path(runtime.config, database)
+        # Auto-backup before replace
+        if if_exists == "replace" and runtime.config.auto_backup_on_replace:
+            backup_table_before_replace(db_path, table_name, scratch_dir)
         try:
             result = to_serializable(
                 write_tabular_dataset_to_database(
@@ -3506,13 +5065,24 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         runtime,
         "upload_csv_for_analysis",
         "Upload inline CSV text as a profile table file, ready for inspect_profile_table "
-        "or profile_table_report. Returns the server-side path. CSV must have a header row. "
-        "This is the FASTEST way to run spectral analysis on your own data.",
+        "or profile_table_report. Returns the server-side path and validates the shared "
+        "profile-table contract. CSV must have a header row. This is the FASTEST way to "
+        "run spectral analysis on your own data.",
     )
     def upload_csv_for_analysis_tool(
         csv_content: str,
         filename: str = "profile.csv",
+        time_column: str = "time",
+        position_columns: list[str] | None = None,
+        position_values: list[float] | None = None,
+        sort_by_time: bool = False,
+        validate: bool = True,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("upload_csv_for_analysis")
+        sanitize_filename(filename)
+        scratch_dir = _managed_scratch_directory(runtime.config)
+        check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
+        check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
         max_size = 5 * 1024 * 1024
         if len(csv_content) > max_size:
             raise ValueError(
@@ -3522,7 +5092,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         path.write_text(csv_content, encoding="utf-8")
         _audit_log(runtime.config, "UPLOAD_CSV", filename, size=len(csv_content))
         line_count = csv_content.count("\n")
-        return {
+        payload = {
             "path": str(path),
             "size_bytes": len(csv_content),
             "lines": line_count,
@@ -3531,6 +5101,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 f"profile_table_report(table_path='{path}')",
             ],
         }
+        if validate:
+            table = load_profile_table(
+                path,
+                time_column=time_column,
+                position_columns=position_columns,
+                position_values=position_values,
+                sort_by_time=sort_by_time,
+            )
+            payload["validation"] = {
+                "time_column": time_column,
+                "position_columns": list(position_columns) if position_columns is not None else None,
+                "position_values": list(position_values) if position_values is not None else None,
+                "sort_by_time": sort_by_time,
+                "num_samples": int(table.num_samples),
+                "num_positions": int(table.num_positions),
+            }
+        return payload
 
     @_tool(
         server,
@@ -3541,6 +5128,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     def delete_scratch_file_tool(
         filename: str,
     ) -> dict[str, Any]:
+        runtime._write_limiter.check("delete_scratch_file")
+        sanitize_filename(filename)
         path = _managed_scratch_path(runtime.config, filename)
         if not path.exists():
             raise FileNotFoundError(f"File {filename!r} not found in scratch directory.")
@@ -3560,6 +5149,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "This is the repository's self-referential runtime audit workflow: it records startup, tool exposure, "
         "input validation, scratch-path containment, query-guard behavior, and optional repeated/burst stress checks.",
         bounded=True,
+        http_mirror=True,
     )
     def probe_mcp_runtime_tool(output_dir: str | None = None, profile: str = "smoke") -> dict[str, Any]:
         probe_output_dir = output_dir
@@ -3740,15 +5330,19 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "(5) SQL capability, (6) scratch directory access. "
         "Use this after startup to confirm the server is fully operational.",
         bounded=True,
+        http_mirror=True,
     )
     def self_test_tool(device: str = "cpu") -> dict[str, Any]:
         import socket
 
         checks: dict[str, Any] = {}
+        tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
 
         # 1. Library version
-        from spectral_packet_engine.version import __version__
+        from spectral_packet_engine.version import __version__, resolve_git_commit
         checks["library_version"] = __version__
+        checks["git_commit"] = resolve_git_commit()
 
         # 2. Server address
         hostname = socket.gethostname()
@@ -3766,10 +5360,15 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "streamable_http_path": runtime.config.streamable_http_path,
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
+            "registered_tool_count": tool_count,
+            "tool_catalog_fingerprint": tool_catalog_fingerprint,
+            "http_bridge_tool_count": http_bridge_tool_count,
+            "http_bridge_fingerprint": http_bridge_fingerprint,
             "network_note": (
                 "bind_host/bind_port/endpoint_url reflect the configured listener. "
                 "best_effort_ipv4 is observational only and may not be remotely routable."
             ),
+            "http_compatibility_routes": _http_mirror_manifest(server),
         }
 
         from spectral_packet_engine.domain import InfiniteWell1D
@@ -3865,10 +5464,15 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         "Return the MCP server's connection details, hostname, local IP, "
         "library version, and scratch directory path. Use this to verify "
         "which server you are connected to.",
+        intent_phrases=(
+            "the caller needs to verify which MCP server instance is connected",
+            "the user wants authoritative endpoint, scratch-directory, or bind-host facts",
+        ),
+        http_mirror=True,
     )
     def server_info_tool() -> dict[str, Any]:
         import socket
-        from spectral_packet_engine.version import __version__
+        from spectral_packet_engine.version import __version__, resolve_git_commit
 
         hostname = socket.gethostname()
         try:
@@ -3877,11 +5481,14 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             local_ip = "127.0.0.1"
 
         scratch_dir = _managed_scratch_directory(runtime.config)
+        tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
+        http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
 
         return {
             "hostname": hostname,
             "best_effort_ipv4": local_ip,
             "library_version": __version__,
+            "git_commit": resolve_git_commit(),
             "transport": runtime.config.transport,
             "bind_host": runtime.config.host,
             "bind_port": runtime.config.port,
@@ -3890,9 +5497,14 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "scratch_dir": str(scratch_dir),
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
+            "registered_tool_count": tool_count,
+            "tool_catalog_fingerprint": tool_catalog_fingerprint,
+            "http_bridge_tool_count": http_bridge_tool_count,
+            "http_bridge_fingerprint": http_bridge_fingerprint,
             "max_concurrent_tasks": runtime.config.max_concurrent_tasks,
             "log_destination": runtime.config.log_destination,
             "allow_unsafe_python": runtime.config.allow_unsafe_python,
+            "http_compatibility_routes": _http_mirror_manifest(server),
             "network_note": (
                 "Use bind_host/bind_port/endpoint_url as the authoritative connection facts. "
                 "best_effort_ipv4 is a best-effort hostname resolution only."
@@ -3964,6 +5576,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             kramers_kronig(frequencies, values, direction=direction)
         )
 
+    _install_http_tool_mirrors(server)
     return server
 
 

@@ -83,7 +83,7 @@ def to_serializable(value: Any) -> Any:
         return {"real": to_serializable(value.real), "imag": to_serializable(value.imag)}
     if isinstance(value, Mapping):
         return {str(key): to_serializable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [to_serializable(item) for item in value]
     return value
 
@@ -947,6 +947,71 @@ def write_transport_benchmark_artifacts(output_dir: str | Path, summary: Any) ->
         return directory
 
 
+def write_benchmark_registry_artifacts(
+    output_dir: str | Path,
+    report: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> Path:
+    with _artifact_output_session(output_dir) as directory:
+        write_json(directory / "benchmark_registry.json", report)
+        write_rows_csv(
+            directory / "benchmark_cases.csv",
+            [
+                "case_id",
+                "status",
+                "score",
+                "backend",
+                "elapsed_seconds",
+                "python_peak_bytes",
+            ],
+            (
+                [
+                    result.definition.case_id,
+                    result.status,
+                    None if result.metrics is None else result.metrics.score,
+                    None if result.metrics is None else result.metrics.backend.get("backend"),
+                    None if result.metrics is None else result.metrics.timing.get("total_elapsed_seconds"),
+                    None if result.metrics is None else result.metrics.memory.get("python_peak_bytes"),
+                ]
+                for result in report.case_results
+            ),
+        )
+        write_artifact_index(
+            directory,
+            metadata=_artifact_metadata({"workflow": "benchmark-registry"}, metadata),
+        )
+        return directory
+
+
+def write_spectral_dataset_artifacts(
+    output_dir: str | Path,
+    dataset: Any,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> Path:
+    with _artifact_output_session(output_dir) as directory:
+        write_json(directory / "spectral_dataset.json", dataset.to_dict())
+        write_json(
+            directory / "spectral_dataset_values.json",
+            {
+                "values": dataset.values,
+                "uncertainty": dataset.uncertainty_values(),
+            },
+        )
+        write_artifact_index(
+            directory,
+            metadata=_artifact_metadata(
+                {
+                    "workflow": "spectral-dataset",
+                    "content_hash": dataset.content_hash,
+                },
+                metadata,
+            ),
+        )
+        return directory
+
+
 def write_tensorflow_training_artifacts(output_dir: str | Path, summary: Any) -> Path:
     with _artifact_output_session(output_dir) as directory:
         write_json(directory / "tf_training.json", summary)
@@ -1311,8 +1376,10 @@ __all__ = [
     "read_artifact_index",
     "to_serializable",
     "write_tabular_artifacts",
+    "write_benchmark_registry_artifacts",
     "write_compression_artifacts",
     "write_feature_table_artifacts",
+    "write_spectral_dataset_artifacts",
     "write_profile_table_report_artifacts",
     "write_compression_sweep_artifacts",
     "write_artifact_index",

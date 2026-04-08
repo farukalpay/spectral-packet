@@ -10,7 +10,13 @@ import numpy as np
 import torch
 
 from spectral_packet_engine.runtime_files import atomic_output_path
-from spectral_packet_engine.tabular import TabularDataset
+from spectral_packet_engine.tabular import (
+    TabularDataset,
+    load_tabular_dataset_csv,
+    load_tabular_dataset_json,
+    load_tabular_dataset_tsv,
+    load_tabular_dataset_xlsx,
+)
 
 
 _POSITION_PREFIXES = ("x=", "position=", "x:", "position:")
@@ -65,6 +71,7 @@ def _supported_profile_format_labels() -> str:
 class ProfileTableMaterializationConfig:
     time_column: str = "time"
     position_columns: tuple[str, ...] | None = None
+    position_values: tuple[float, ...] | None = None
     sort_by_time: bool = False
     source: str | None = None
 
@@ -86,9 +93,22 @@ class ProfileTableMaterializationConfig:
             if time_column.lower() in lowered:
                 raise ValueError("position_columns must not include the time column")
 
+        position_values = None
+        if self.position_values is not None:
+            if position_columns is None:
+                raise ValueError("position_values require explicit position_columns")
+            position_values = tuple(float(value) for value in self.position_values)
+            if len(position_values) != len(position_columns):
+                raise ValueError("position_values must align one-to-one with position_columns")
+            if not position_values:
+                raise ValueError("position_values must not be empty when provided")
+            if not np.isfinite(np.asarray(position_values, dtype=np.float64)).all():
+                raise ValueError("position_values must contain only finite numeric values")
+
         source = None if self.source is None else str(self.source)
         object.__setattr__(self, "time_column", time_column)
         object.__setattr__(self, "position_columns", position_columns)
+        object.__setattr__(self, "position_values", position_values)
         object.__setattr__(self, "source", source)
 
 
@@ -141,16 +161,24 @@ def _coerce_materialization_config(
     config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     source: str | None = None,
 ) -> ProfileTableMaterializationConfig:
     if config is not None:
-        if position_columns is not None or sort_by_time or source is not None or time_column != "time":
+        if (
+            position_columns is not None
+            or position_values is not None
+            or sort_by_time
+            or source is not None
+            or time_column != "time"
+        ):
             raise ValueError("pass either config or explicit materialization arguments, not both")
         return config
     return ProfileTableMaterializationConfig(
         time_column=time_column,
         position_columns=None if position_columns is None else tuple(position_columns),
+        position_values=None if position_values is None else tuple(position_values),
         sort_by_time=sort_by_time,
         source=source,
     )
@@ -178,17 +206,19 @@ def _resolve_profile_table_layout(
     time_column = _resolve_column_name(columns, config.time_column)
     if config.position_columns is None:
         position_columns = [name for name in columns if name != time_column]
+        position_pairs = [(_parse_position_token(name), name) for name in position_columns]
     else:
         position_columns = [_resolve_column_name(columns, name) for name in config.position_columns]
+        if config.position_values is None:
+            position_pairs = [(_parse_position_token(name), name) for name in position_columns]
+        else:
+            position_pairs = list(zip(config.position_values, position_columns, strict=True))
     if not position_columns:
         raise ValueError("tabular dataset must contain at least one position column")
     if len(set(position_columns)) != len(position_columns):
         raise ValueError("position_columns resolved to duplicate dataset columns")
 
-    ordered = sorted(
-        ((_parse_position_token(name), name) for name in position_columns),
-        key=lambda item: item[0],
-    )
+    ordered = sorted(position_pairs, key=lambda item: item[0])
     return ProfileTableLayoutResolution(
         time_column=time_column,
         source_position_columns=tuple(position_columns),
@@ -207,7 +237,10 @@ def _profile_table_from_columns(
     sort_by_time: bool = False,
     source: str | None = None,
 ) -> "ProfileTable":
-    sample_times = np.asarray(columns[layout.time_column], dtype=np.float64)
+    try:
+        sample_times = np.asarray(columns[layout.time_column], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"profile table time column '{layout.time_column}' must be numeric") from exc
     profiles = np.column_stack(
         [np.asarray(columns[name], dtype=np.float64) for name in layout.position_columns]
     )
@@ -296,6 +329,7 @@ def profile_table_from_tabular_dataset(
     config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     source: str | None = None,
 ) -> ProfileTable:
@@ -306,6 +340,7 @@ def profile_table_from_tabular_dataset(
         config=config,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         source=source,
     )
@@ -326,11 +361,13 @@ def resolve_profile_table_layout_from_tabular_dataset(
     config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
 ) -> ProfileTableLayoutResolution:
     materialization = _coerce_materialization_config(
         config=config,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
     )
     return _resolve_profile_table_layout(dataset.columns, config=materialization)
 
@@ -341,12 +378,14 @@ def profile_table_layout_from_tabular_dataset(
     config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
 ) -> ProfileTableLayout:
     return resolve_profile_table_layout_from_tabular_dataset(
         dataset,
         config=config,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
     ).layout
 
 
@@ -357,6 +396,48 @@ def tabular_dataset_from_profile_table(table: ProfileTable) -> TabularDataset:
     for index, position in enumerate(table.position_grid.tolist()):
         columns[format(position, ".12g")] = np.asarray(table.profiles[:, index], dtype=np.float64)
     return TabularDataset(columns=columns)
+
+
+def _needs_transpose(header: list[str], rows: list[list[str]], time_column: str) -> bool:
+    """Detect a transposed layout where the first column holds numeric positions
+    and the remaining headers are string profile names.  In the canonical layout
+    the first header is *time_column* and the remaining headers are numeric
+    positions.  When both:
+      1. header[0] looks like a position label (e.g. 'x', 'position') and
+      2. none of header[1:] parse as floats, but all values in column-0 do
+    we conclude the table is transposed and should be flipped."""
+    first = header[0].strip().lower()
+    if first not in ("x", "position", "pos", "grid"):
+        return False
+    # Check that remaining headers are NOT numeric (i.e. they are profile names)
+    for h in header[1:]:
+        try:
+            float(h.strip())
+            return False  # at least one is numeric → not transposed
+        except ValueError:
+            continue
+    # Check that first-column values ARE numeric (positions)
+    for row in rows[:5]:
+        if not row:
+            continue
+        try:
+            float(row[0].strip())
+        except ValueError:
+            return False
+    return True
+
+
+def _transpose_rows(header: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """Transpose a table where rows are positions and columns are profiles
+    into the canonical layout where rows are profiles and columns are positions."""
+    profile_names = header[1:]  # string names become the "time" (sample) labels
+    positions = [row[0] for row in rows]  # first column → position headers
+    new_header = ["time"] + positions
+    new_rows: list[list[str]] = []
+    for col_idx, name in enumerate(profile_names):
+        new_row = [name] + [row[col_idx + 1] for row in rows]
+        new_rows.append(new_row)
+    return new_header, new_rows
 
 
 def _load_profile_table_delimited(
@@ -375,22 +456,31 @@ def _load_profile_table_delimited(
 
         if len(header) < 2:
             raise ValueError("profile table must contain a time column and at least one position column")
-        if header[0].strip().lower() != time_column.lower():
-            raise ValueError(f"profile table must start with a '{time_column}' column")
 
-        position_grid = np.asarray([_parse_position_token(token) for token in header[1:]], dtype=np.float64)
-        sample_times: list[float] = []
-        profiles: list[list[float]] = []
+        raw_rows = [row for row in reader if row and not all(not cell.strip() for cell in row)]
 
-        for row_index, row in enumerate(reader, start=2):
-            if not row or all(not cell.strip() for cell in row):
-                continue
-            if len(row) != len(header):
-                raise ValueError(
-                    f"profile table row {row_index} has {len(row)} columns, expected {len(header)}"
-                )
+    # Auto-transpose: first column is positions, remaining columns are profiles
+    if _needs_transpose(header, raw_rows, time_column):
+        header, raw_rows = _transpose_rows(header, raw_rows)
+
+    if header[0].strip().lower() != time_column.lower():
+        raise ValueError(f"profile table must start with a '{time_column}' column")
+
+    position_grid = np.asarray([_parse_position_token(token) for token in header[1:]], dtype=np.float64)
+    sample_times: list[float] = []
+    profiles: list[list[float]] = []
+
+    for row_index, row in enumerate(raw_rows, start=2):
+        if len(row) != len(header):
+            raise ValueError(
+                f"profile table row {row_index} has {len(row)} columns, expected {len(header)}"
+            )
+        # time column: try float first, fall back to index for string labels
+        try:
             sample_times.append(float(row[0]))
-            profiles.append([float(cell) for cell in row[1:]])
+        except ValueError:
+            sample_times.append(float(row_index - 2))
+        profiles.append([float(cell) for cell in row[1:]])
 
     if not profiles:
         raise ValueError("profile table contains no data rows")
@@ -406,22 +496,66 @@ def _load_profile_table_delimited(
 def load_profile_table_csv(
     path: str | Path,
     *,
+    config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
+    position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
+    sort_by_time: bool = False,
 ) -> ProfileTable:
+    if config is not None or position_columns is not None or position_values is not None or sort_by_time or time_column != "time":
+        dataset = load_tabular_dataset_csv(path)
+        return profile_table_from_tabular_dataset(
+            dataset,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     return _load_profile_table_delimited(path, time_column=time_column, delimiter=",")
 
 
 def load_profile_table_tsv(
     path: str | Path,
     *,
+    config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
+    position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
+    sort_by_time: bool = False,
 ) -> ProfileTable:
+    if config is not None or position_columns is not None or position_values is not None or sort_by_time or time_column != "time":
+        dataset = load_tabular_dataset_tsv(path)
+        return profile_table_from_tabular_dataset(
+            dataset,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     return _load_profile_table_delimited(path, time_column=time_column, delimiter="\t")
 
 
 def load_profile_table_json(
     path: str | Path,
+    *,
+    config: ProfileTableMaterializationConfig | None = None,
+    time_column: str = "time",
+    position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
+    sort_by_time: bool = False,
 ) -> ProfileTable:
+    if config is not None or position_columns is not None or position_values is not None or sort_by_time or time_column != "time":
+        dataset = load_tabular_dataset_json(path)
+        return profile_table_from_tabular_dataset(
+            dataset,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     input_path = Path(path)
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -447,8 +581,22 @@ def load_profile_table_json(
 def load_profile_table_xlsx(
     path: str | Path,
     *,
+    config: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
+    position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
+    sort_by_time: bool = False,
 ) -> ProfileTable:
+    if config is not None or position_columns is not None or position_values is not None or sort_by_time or time_column != "time":
+        dataset = load_tabular_dataset_xlsx(path)
+        return profile_table_from_tabular_dataset(
+            dataset,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     try:
         from openpyxl import load_workbook
     except ModuleNotFoundError as exc:
@@ -589,17 +737,53 @@ def save_profile_table_xlsx(
     return output_path
 
 
-def load_profile_table(path: str | Path) -> ProfileTable:
+def load_profile_table(
+    path: str | Path,
+    *,
+    config: ProfileTableMaterializationConfig | None = None,
+    time_column: str = "time",
+    position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
+    sort_by_time: bool = False,
+) -> ProfileTable:
     input_path = Path(path)
     suffix = input_path.suffix.lower()
     if suffix == ".csv":
-        return load_profile_table_csv(input_path)
+        return load_profile_table_csv(
+            input_path,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     if suffix == ".tsv":
-        return load_profile_table_tsv(input_path)
+        return load_profile_table_tsv(
+            input_path,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     if suffix == ".json":
-        return load_profile_table_json(input_path)
+        return load_profile_table_json(
+            input_path,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     if suffix == ".xlsx":
-        return load_profile_table_xlsx(input_path)
+        return load_profile_table_xlsx(
+            input_path,
+            config=config,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+        )
     supported = _supported_profile_format_labels()
     raise ValueError(f"unsupported profile table format '{suffix or '<none>'}'; supported formats: {supported}")
 

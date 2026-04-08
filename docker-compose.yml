@@ -1,0 +1,26 @@
+services:
+  spectral-packet-engine-mcp:
+    build:
+      context: .
+    image: spectral-packet-engine:mcp
+    labels:
+      com.lightcap.service: spectral-packet-engine-mcp
+    restart: unless-stopped
+    ports:
+      - "${SPE_PUBLISHED_HOST:-127.0.0.1}:${SPE_PUBLISHED_PORT:-8765}:8000"
+    environment:
+      SPE_PORT: "8000"
+      SPE_STREAMABLE_HTTP_PATH: "${SPE_STREAMABLE_HTTP_PATH:-/mcp}"
+      SPE_MCP_MAX_CONCURRENT: "${SPE_MCP_MAX_CONCURRENT:-2}"
+      SPE_MCP_SLOT_TIMEOUT_SECONDS: "${SPE_MCP_SLOT_TIMEOUT_SECONDS:-60}"
+      SPE_MCP_LOG_LEVEL: "${SPE_MCP_LOG_LEVEL:-warning}"
+      SPE_PUBLIC_HOSTS: "${SPE_PUBLIC_HOSTS:-}"
+      SPE_PUBLIC_SCHEME: "${SPE_PUBLIC_SCHEME:-https}"
+      SPE_PUBLIC_PORT: "${SPE_PUBLIC_PORT:-}"
+      SPE_ROOT_REDIRECT_PATH: "${SPE_ROOT_REDIRECT_PATH:-/mcp/server_info}"
+      SPE_ALLOWED_HOSTS: "${SPE_ALLOWED_HOSTS:-}"
+      SPE_ALLOWED_ORIGINS: "${SPE_ALLOWED_ORIGINS:-}"
+      SPE_ALLOW_UNSAFE_PYTHON: "${SPE_ALLOW_UNSAFE_PYTHON:-false}"
+    volumes:
+      - ./docker-data/scratch:/data/scratch
+      - ./docker-data/logs:/data/logs

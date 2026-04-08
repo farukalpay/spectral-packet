@@ -62,8 +62,10 @@ SERVER_PURPOSE = (
     "To load data via SELECT into a new table, use 'materialize_query_table'. "
     "NEVER use bash/python/sqlite3 to open files or databases — use the MCP tools instead. "
     "Use 'inspect_product' to see the full workflow map, 'guide_workflow' to choose the default "
-    "report, inverse-fit, or feature-model loop, 'inspect_environment' to check available hardware, "
-    "and 'validate_installation' before heavy computation."
+    "report, inverse-fit, or feature-model loop, and 'plan_experiment' when the user gives a short "
+    "scientific intent but needs a suggested tool chain without parameter values. Tool responses include "
+    "'related_tools' so the client can choose adjacent next steps without hardcoded routing. Use "
+    "'inspect_environment' to check available hardware, and 'validate_installation' before heavy computation."
 )
 
 SERVER_PURPOSE_SHORT = (

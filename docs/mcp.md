@@ -13,6 +13,8 @@ It is useful when you want:
 
 It is not a separate product. MCP is a machine-facing wrapper over the shared workflow layer.
 
+For bounded-state work, MCP no longer depends on `execute_python` just to leave the Gaussian happy path. The packet tools accept explicit state specifications for `gaussian`, `plane_wave`, `windowed_plane_wave`, `box_mode`, `spectral_coefficients`, and `sampled_wavefunction`.
+
 ## Install
 
 ```bash
@@ -41,9 +43,11 @@ Useful runtime controls:
 spectral-packet-engine serve-mcp --max-concurrent-tasks 1 --slot-timeout-seconds 60 --log-level warning
 spectral-packet-engine serve-mcp --log-file logs/mcp.log
 spectral-packet-engine serve-mcp --transport streamable-http --port 8765 --streamable-http-path /mcp
+docker compose up -d --build
 ```
 
 Important rule: stdout is reserved for MCP protocol messages. Repository-managed logs go to stderr by default or to the log file you configure.
+The repository compose file binds `127.0.0.1:8765` by default; widen `SPE_PUBLISHED_HOST` only if you mean to expose the listener directly instead of through a reverse proxy.
 
 Minimal `.mcp.json` example:
 
@@ -65,15 +69,26 @@ Local stdio MCP is the simplest AI-client path:
 - the engine runs in-process on the same machine.
 
 For a remote always-on deployment, prefer streamable HTTP plus an external supervisor, then tunnel or otherwise expose the endpoint explicitly.
+The repository `./scripts/deploy_mcp_docker.sh` deploy path is container-first and can hand off the target port from legacy systemd MCP units to Docker when the unit clearly belongs to this product.
+Use `spectral-packet-engine plan-mcp-ingress --public-host lightcap.ai` before editing nginx manually; it renders the canonical public endpoint, aligned `allowed_hosts` / `allowed_origins`, the Docker env block, a full nginx server block for dedicated hosts, and a path-level location snippet for domains that are already owned by another site config.
 
 For the shared hosted deployment, the public MCP endpoint is [https://lightcap.ai/mcp](https://lightcap.ai/mcp).
+
+For path-oriented HTTP bridge clients, prefer the scoped routes under the same mount:
+
+- [https://lightcap.ai/mcp/tool_registry](https://lightcap.ai/mcp/tool_registry)
+- [https://lightcap.ai/mcp/server_info](https://lightcap.ai/mcp/server_info)
+- [https://lightcap.ai/mcp/inspect_product](https://lightcap.ai/mcp/inspect_product)
 
 ## Core Tool Families
 
 - environment and install inspection
+- intent-to-tool-chain planning
 - service status inspection
 - file-format and tabular capability inspection
 - profile-table report, analysis, compression, comparison, and inverse fitting
+- direct Open-Meteo ingest into the shared tabular/profile-table contract
+- urban boundary-layer, radiative-temperature, operative-temperature, and thermal-load derivation over shared tabular weather data
 - potential-family inference and uncertainty-aware spectral inverse workflows
 - reduced models: separable spectra, coupled surfaces, and radial reductions
 - differentiable design and packet-control workflows
@@ -99,6 +114,12 @@ The MCP server now publishes machine-readable discovery surfaces in addition to 
   - `select_vertical_workflow`
 
 These exist so an MCP client can decide which spectral capability to call without inventing its own routing policy.
+
+Tool discovery is also embedded directly into the tool surface:
+
+- `plan_experiment` converts a short natural-language scientific intent into an ordered tool chain without filling parameter values.
+- every tool description is phrased as an intent trigger (`Use when ...`) instead of a bare implementation label.
+- every structured tool response includes `related_tools`, so a client can inspect adjacent next steps from the result payload itself.
 
 ### Analysis Pipelines (auto-parameterized, one-call)
 
@@ -127,13 +148,16 @@ An AI client can say "analyze this profile CSV" and receive a complete structure
 | `transport_workflow` | Vertical workflow | one transport bundle spanning scattering, WKB, propagation, and Wigner diagnostics |
 | `profile_inference_workflow` | Vertical workflow | one nested bundle spanning report, inverse fit, and feature export |
 
-### Advanced Physics Tools (60+ tools total)
+### Advanced Physics Tools (100+ tools total)
 
 These tools expose the deep physics modules directly to AI clients:
 
 | Tool | Physics | Key Output |
 | --- | --- | --- |
 | `solve_eigenproblem` | Schrödinger eigenvalue for arbitrary V(x) | Eigenvalues, eigenstates, orthonormality check |
+| `simulate_packet` | Bounded state propagation | Density snapshots, uncertainty, optional interval traces, density-matrix diagnostics, Wigner phase-space diagnostics |
+| `project_packet` | Bounded state projection | Modal coefficients, reconstruction quality, density-matrix diagnostics, Wigner phase-space diagnostics |
+| `compare_box_states` | Multi-state boxed comparison | Per-state forward diagnostics plus pairwise fidelity, trace distance, momentum, and uncertainty comparisons |
 | `split_operator_propagate` | Time-dependent wavepacket propagation | Density evolution, norm/energy conservation |
 | `compute_wigner_function` | Phase-space Wigner distribution | Negativity, marginals, non-classicality |
 | `analyze_density_matrix` | Quantum state characterization | Purity, von Neumann entropy, rank |
@@ -178,6 +202,13 @@ These tools let AI agents manage scratch data, run trusted-only local Python whe
 
 The `execute_python` tool is intentionally disabled by default. It becomes available only when the operator starts the server with `--allow-unsafe-python` for a trusted local session. The `scratch_dir` variable is pre-set to the managed MCP scratch directory reported by `server_info`.
 
+`upload_csv_for_analysis` now validates the shared profile-table contract at upload time. If your CSV uses semantic value columns instead of numeric headers, pass explicit `time_column`, repeated `position_columns`, repeated `position_values`, and optionally `sort_by_time` rather than renaming source data into a brittle temporary schema.
+
+`ingest_open_meteo_hourly_dataset` gives the MCP surface a direct meteorology binder without pushing weather-specific cleanup into interface code. It fetches Open-Meteo hourly variables into a normalized tabular dataset, writes the dataset to managed scratch by default, and only materializes a profile table when the caller provides explicit `position_columns` plus matching `position_values`.
+`derive_urban_microclimate` sits one layer above that raw weather ingest. It keeps column alignment explicit through either a named profile such as `open-meteo` or direct column arguments, then derives neutral boundary-layer exchange, mean radiant temperature, operative temperature, and human thermal storage without burying those assumptions inside MCP wrapper code.
+
+For boxed-state workflows, prefer the dedicated bounded tools over `execute_python`. A client can now compare non-Gaussian candidates in one call by sending `windowed_plane_wave`, `box_mode`, `spectral_coefficients`, or `sampled_wavefunction` state specifications to `compare_box_states`.
+
 For detailed usage sessions and example prompts, see [mcp-usage-guide.md](mcp-usage-guide.md).
 
 ## Runtime Trust Signals
@@ -186,11 +217,14 @@ The MCP server exposes the same runtime model as the rest of the product:
 
 - `inspect_product` for the shared product spine, runtime spine, and workflow map
 - `guide_workflow` for the recommended high-value loop and defaults for file-backed or SQL-backed work
+- `plan_experiment` for intent-to-tool-chain planning when the user gives a short experiment request
 - `inspect_environment` for machine capability inspection
 - `inspect_tree_backends` for sklearn-first and optional boosted-tree backend availability
 - `inspect_mcp_runtime` for transport, platform, bounded-execution, and logging policy inspection
 - `validate_installation` for surface readiness
 - `inspect_service_status` for uptime, task counters, and recent runs with canonical `workflow_id` plus raw `surface_action`
+
+For streamable-HTTP deployments, every tool also has deterministic compatibility routes at `/<tool_name>`, `/Lightcap/<tool_name>`, `/mcp/<tool_name>`, and `/mcp/Lightcap/<tool_name>`, with bridge manifests at `/tool_registry`, `/Lightcap/tool_registry`, `/mcp/tool_registry`, and `/mcp/Lightcap/tool_registry`. The path-scoped `/mcp/...` variants are the safest bridge targets when a reverse proxy only publishes the MCP mount itself. Those routes call the same shared implementations as MCP `call_tool`; MCP remains the canonical control surface.
 
 That lets an MCP client ask:
 
@@ -357,6 +391,8 @@ Use `server_info` after connecting. Treat these fields as authoritative:
 - `bind_port`
 - `streamable_http_path`
 - `endpoint_url`
+- `http_bridge_tool_count`
+- `http_bridge_fingerprint`
 
 Treat `best_effort_ipv4` as observational only.
 

@@ -43,11 +43,86 @@ spectral-packet-engine install-mcp-service --yes --enable
 
 `install-mcp-service` is opt-in. It does not change the Python library, the CLI, or existing scripts unless you explicitly enable the new supervised MCP path.
 
+### Container-first deployment
+
+If you want the runtime contract and health check to stay identical across laptops and servers, use the repository Docker assets:
+
+```bash
+docker compose up -d --build
+```
+
+That publishes `http://127.0.0.1:8765/mcp`, persists scratch and logs under `docker-data/`, and health-checks the real callable bridge route at `/mcp/server_info` instead of a synthetic placeholder.
+The compose contract binds to `127.0.0.1` by default so an nginx or Caddy front end can stay the only public edge; override `SPE_PUBLISHED_HOST` only when a direct bind is intentional.
+The Docker image installs the CPU PyTorch wheel explicitly so a default Linux deployment does not pull CUDA-heavy runtimes unless you choose a different container build.
+
+If `.env` is populated with the remote host settings, the repository can push the same Docker deployment over SSH:
+
+```bash
+./scripts/deploy_mcp_docker.sh
+```
+
+The deploy script exports a stable `COMPOSE_PROJECT_NAME`, removes older managed containers that still publish the target port, and can stop legacy `spectral_packet_engine serve-mcp` systemd units on that same port before it starts Docker. If the port is still owned by an unrelated process, the script fails with ownership diagnostics instead of starting a half-published deployment.
+If `SPE_PUBLIC_HOSTS` is configured, the container entrypoint auto-derives `SPE_ALLOWED_HOSTS` and `SPE_ALLOWED_ORIGINS` from the public ingress contract instead of leaving Host/Origin policy to manual drift.
+If `SPE_INSTALL_NGINX_SITE=true`, the deploy script also renders a site file from the shared library plan, installs it under `/etc/nginx/sites-available`, enables it, validates `nginx -t`, reloads nginx, and verifies both the site root and `/mcp/server_info` through the local reverse proxy.
+With `SPE_NGINX_SITE_MODE=detect` the deploy script first checks whether another enabled nginx site already owns one of the requested public hosts. When it detects a shared host, it refuses to install a competing server block, writes the generated MCP `location` snippet to `/etc/nginx/snippets/`, and exits with diagnostics instead of leaving hostname routing ambiguous.
+
 Published HTTPS route:
 
 - the current public MCP endpoint is [https://lightcap.ai/mcp](https://lightcap.ai/mcp),
 - users should treat that HTTPS URL as the default shared deployment entrypoint,
 - self-hosted deployments can keep the origin listener private while the reverse proxy publishes HTTPS.
+
+### Reverse-proxy contract
+
+Render the alignment plan before touching nginx:
+
+```bash
+spectral-packet-engine plan-mcp-ingress \
+  --public-host lightcap.ai \
+  --public-host www.lightcap.ai \
+  --upstream-port 8765
+```
+
+That gives you:
+
+- the canonical public endpoint URL,
+- the exact `allowed_hosts` and `allowed_origins` values the MCP server should accept,
+- the Docker env block for a loopback-bound container,
+- the nginx server block for a dedicated hostname,
+- the nginx location snippet for a hostname that is already owned by another site config.
+
+If you publish the streamable-HTTP server behind nginx or another reverse proxy, proxy both the exact MCP mount and the scoped prefix. Publishing only the exact mount can make MCP `initialize` succeed while path-based compatibility routes still return `404`.
+
+Example nginx shape:
+
+```nginx
+location = /mcp {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+}
+
+location /mcp/ {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+}
+```
+
+After any reverse-proxy change, verify both:
+
+- `GET /mcp`
+- `GET /mcp/tool_registry`
 
 ## 3. SSH Tunnel Plan
 
@@ -144,8 +219,23 @@ Recommended first calls after attaching:
 - `endpoint_url`
 - `allowed_hosts`
 - `allowed_origins`
+- `http_bridge_tool_count`
+- `http_bridge_fingerprint`
 
 `best_effort_ipv4` is observational only. `endpoint_url` is the internal listener URL; the published public route is [https://lightcap.ai/mcp](https://lightcap.ai/mcp).
+
+For streamable-HTTP deployments, every MCP tool is also mirrored through deterministic compatibility routes:
+
+- `GET|POST /<tool_name>`
+- `GET|POST /Lightcap/<tool_name>`
+- `GET|POST /tool_registry`
+- `GET|POST /Lightcap/tool_registry`
+- `GET|POST /mcp/<tool_name>`
+- `GET|POST /mcp/Lightcap/<tool_name>`
+- `GET|POST /mcp/tool_registry`
+- `GET|POST /mcp/Lightcap/tool_registry`
+
+The path-scoped `/mcp/...` variants are the safest choice behind reverse proxies that only publish the MCP mount itself. All of these routes call the same shared tool implementations as MCP `call_tool`; they exist only to keep path-oriented clients and exported tool links aligned with the canonical MCP tool surface. `tool_registry` is the authoritative HTTP bridge manifest.
 
 ## 7. Example Prompts
 

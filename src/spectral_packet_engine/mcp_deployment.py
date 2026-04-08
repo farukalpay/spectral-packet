@@ -23,6 +23,65 @@ def _normalize_env(env: Mapping[str, str] | None) -> dict[str, str]:
     }
 
 
+def _normalize_mount_path(path: str) -> str:
+    return "/" if str(path) == "/" else "/" + str(path).strip("/")
+
+
+def _normalize_public_scheme(scheme: str) -> str:
+    normalized = str(scheme).strip().lower()
+    if normalized not in {"http", "https"}:
+        raise ValueError("public_scheme must be either 'http' or 'https'")
+    return normalized
+
+
+def _normalize_public_hostnames(hosts: Sequence[str] | str) -> tuple[str, ...]:
+    if isinstance(hosts, str):
+        raw_hosts = tuple(str(item).strip() for item in hosts.split(","))
+    else:
+        raw_hosts = tuple(str(item).strip() for item in hosts)
+    normalized: list[str] = []
+    for host in raw_hosts:
+        if not host:
+            continue
+        if "://" in host or "/" in host or " " in host:
+            raise ValueError(f"public hostnames must be plain host tokens, got {host!r}")
+        normalized.append(host)
+    deduplicated = tuple(dict.fromkeys(normalized))
+    if not deduplicated:
+        raise ValueError("at least one public hostname is required")
+    return deduplicated
+
+
+def _origin_for_host(host: str, *, scheme: str, port: int | None) -> str:
+    default_port = 443 if scheme == "https" else 80
+    if port is None or int(port) == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{int(port)}"
+
+
+def derive_public_mcp_network_identity(
+    *,
+    public_hosts: Sequence[str] | str,
+    public_scheme: str = "https",
+    public_port: int | None = None,
+    streamable_http_path: str = "/mcp",
+) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    resolved_hosts = _normalize_public_hostnames(public_hosts)
+    resolved_scheme = _normalize_public_scheme(public_scheme)
+    resolved_path = _normalize_mount_path(streamable_http_path)
+    allowed_hosts: list[str] = []
+    for host in resolved_hosts:
+        allowed_hosts.append(host)
+        if ":" not in host:
+            allowed_hosts.append(f"{host}:*")
+    allowed_origins = tuple(
+        _origin_for_host(host, scheme=resolved_scheme, port=public_port)
+        for host in resolved_hosts
+    )
+    public_endpoint = f"{allowed_origins[0]}{resolved_path}"
+    return tuple(dict.fromkeys(allowed_hosts)), allowed_origins, public_endpoint
+
+
 def detect_source_checkout(path: str | Path) -> bool:
     root = Path(path)
     return (root / "src" / "spectral_packet_engine" / "__init__.py").exists()
@@ -82,6 +141,90 @@ def default_mcp_server_command(
     return tuple(command)
 
 
+def render_nginx_mcp_site(
+    *,
+    public_hosts: Sequence[str] | str,
+    upstream_host: str = "127.0.0.1",
+    upstream_port: int = 8765,
+    streamable_http_path: str = "/mcp",
+    root_redirect_path: str | None = "/mcp/server_info",
+    server_tokens_off: bool = True,
+) -> str:
+    resolved_hosts = _normalize_public_hostnames(public_hosts)
+    resolved_path = _normalize_mount_path(streamable_http_path)
+    resolved_root_redirect = None if root_redirect_path is None else _normalize_mount_path(root_redirect_path)
+    server_tokens_line = "    server_tokens off;\n" if server_tokens_off else ""
+    root_block = (
+        f"    location = / {{\n        return 308 {resolved_root_redirect};\n    }}\n\n"
+        if resolved_root_redirect is not None
+        else ""
+    )
+    return (
+        "server {\n"
+        "    listen 80;\n"
+        "    listen [::]:80;\n"
+        f"    server_name {' '.join(resolved_hosts)};\n"
+        f"{server_tokens_line}"
+        f"{root_block}"
+        f"    location = {resolved_path} {{\n"
+        f"        proxy_pass http://{upstream_host}:{int(upstream_port)};\n"
+        "        proxy_http_version 1.1;\n"
+        "        proxy_set_header Connection \"\";\n"
+        "        proxy_set_header Host $host;\n"
+        "        proxy_set_header X-Real-IP $remote_addr;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_buffering off;\n"
+        "        proxy_read_timeout 300;\n"
+        "    }\n\n"
+        f"    location {resolved_path}/ {{\n"
+        f"        proxy_pass http://{upstream_host}:{int(upstream_port)};\n"
+        "        proxy_http_version 1.1;\n"
+        "        proxy_set_header Connection \"\";\n"
+        "        proxy_set_header Host $host;\n"
+        "        proxy_set_header X-Real-IP $remote_addr;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_buffering off;\n"
+        "        proxy_read_timeout 300;\n"
+        "    }\n"
+        "}\n"
+    )
+
+
+def render_nginx_mcp_location_snippet(
+    *,
+    upstream_host: str = "127.0.0.1",
+    upstream_port: int = 8765,
+    streamable_http_path: str = "/mcp",
+) -> str:
+    resolved_path = _normalize_mount_path(streamable_http_path)
+    return (
+        f"location = {resolved_path} {{\n"
+        f"    proxy_pass http://{upstream_host}:{int(upstream_port)};\n"
+        "    proxy_http_version 1.1;\n"
+        "    proxy_set_header Connection \"\";\n"
+        "    proxy_set_header Host $host;\n"
+        "    proxy_set_header X-Real-IP $remote_addr;\n"
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "    proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "    proxy_buffering off;\n"
+        "    proxy_read_timeout 300;\n"
+        "}\n\n"
+        f"location {resolved_path}/ {{\n"
+        f"    proxy_pass http://{upstream_host}:{int(upstream_port)};\n"
+        "    proxy_http_version 1.1;\n"
+        "    proxy_set_header Connection \"\";\n"
+        "    proxy_set_header Host $host;\n"
+        "    proxy_set_header X-Real-IP $remote_addr;\n"
+        "    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "    proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "    proxy_buffering off;\n"
+        "    proxy_read_timeout 300;\n"
+        "}\n"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MCPClientConfiguration:
     server_name: str
@@ -100,6 +243,97 @@ class MCPClientConfiguration:
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return {"mcpServers": {self.server_name: payload}}
+
+
+@dataclass(frozen=True, slots=True)
+class MCPPublicIngressPlan:
+    public_hosts: tuple[str, ...]
+    public_scheme: str
+    public_port: int | None
+    public_endpoint_url: str
+    streamable_http_path: str
+    upstream_host: str
+    upstream_port: int
+    root_redirect_path: str | None
+    allowed_hosts: tuple[str, ...]
+    allowed_origins: tuple[str, ...]
+    docker_environment: dict[str, str]
+    nginx_config: str
+    nginx_location_snippet: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "public_hosts": list(self.public_hosts),
+            "public_scheme": self.public_scheme,
+            "public_port": self.public_port,
+            "public_endpoint_url": self.public_endpoint_url,
+            "streamable_http_path": self.streamable_http_path,
+            "upstream_host": self.upstream_host,
+            "upstream_port": self.upstream_port,
+            "root_redirect_path": self.root_redirect_path,
+            "allowed_hosts": list(self.allowed_hosts),
+            "allowed_origins": list(self.allowed_origins),
+            "docker_environment": dict(self.docker_environment),
+            "nginx_config": self.nginx_config,
+            "nginx_location_snippet": self.nginx_location_snippet,
+        }
+
+
+def build_mcp_public_ingress_plan(
+    *,
+    public_hosts: Sequence[str] | str,
+    public_scheme: str = "https",
+    public_port: int | None = None,
+    upstream_host: str = "127.0.0.1",
+    upstream_port: int = 8765,
+    streamable_http_path: str = "/mcp",
+    root_redirect_path: str | None = "/mcp/server_info",
+) -> MCPPublicIngressPlan:
+    resolved_hosts = _normalize_public_hostnames(public_hosts)
+    resolved_scheme = _normalize_public_scheme(public_scheme)
+    resolved_path = _normalize_mount_path(streamable_http_path)
+    allowed_hosts, allowed_origins, public_endpoint = derive_public_mcp_network_identity(
+        public_hosts=resolved_hosts,
+        public_scheme=resolved_scheme,
+        public_port=public_port,
+        streamable_http_path=resolved_path,
+    )
+    docker_environment = {
+        "SPE_PUBLIC_HOSTS": ",".join(resolved_hosts),
+        "SPE_PUBLIC_SCHEME": resolved_scheme,
+        "SPE_STREAMABLE_HTTP_PATH": resolved_path,
+        "SPE_ALLOWED_HOSTS": ",".join(allowed_hosts),
+        "SPE_ALLOWED_ORIGINS": ",".join(allowed_origins),
+    }
+    if public_port is not None:
+        docker_environment["SPE_PUBLIC_PORT"] = str(int(public_port))
+    if root_redirect_path is not None:
+        docker_environment["SPE_ROOT_REDIRECT_PATH"] = _normalize_mount_path(root_redirect_path)
+    return MCPPublicIngressPlan(
+        public_hosts=resolved_hosts,
+        public_scheme=resolved_scheme,
+        public_port=None if public_port is None else int(public_port),
+        public_endpoint_url=public_endpoint,
+        streamable_http_path=resolved_path,
+        upstream_host=str(upstream_host),
+        upstream_port=int(upstream_port),
+        root_redirect_path=None if root_redirect_path is None else _normalize_mount_path(root_redirect_path),
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+        docker_environment=docker_environment,
+        nginx_config=render_nginx_mcp_site(
+            public_hosts=resolved_hosts,
+            upstream_host=upstream_host,
+            upstream_port=upstream_port,
+            streamable_http_path=resolved_path,
+            root_redirect_path=root_redirect_path,
+        ),
+        nginx_location_snippet=render_nginx_mcp_location_snippet(
+            upstream_host=upstream_host,
+            upstream_port=upstream_port,
+            streamable_http_path=resolved_path,
+        ),
+    )
 
 
 def build_local_mcp_client_configuration(
@@ -501,14 +735,19 @@ __all__ = [
     "DEFAULT_MCP_CLIENT_SERVER_NAME",
     "DEFAULT_MCP_SERVICE_LABEL",
     "MCPClientConfiguration",
+    "MCPPublicIngressPlan",
     "MCPServiceInstallPlan",
     "MCPTunnelPlan",
     "build_local_mcp_client_configuration",
+    "build_mcp_public_ingress_plan",
     "build_mcp_service_install_plan",
     "build_mcp_tunnel_plan",
     "build_ssh_tunnel_command",
     "build_ssh_mcp_client_configuration",
+    "derive_public_mcp_network_identity",
     "default_mcp_server_command",
     "detect_source_checkout",
     "install_mcp_service",
+    "render_nginx_mcp_location_snippet",
+    "render_nginx_mcp_site",
 ]

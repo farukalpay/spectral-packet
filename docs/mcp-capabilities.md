@@ -23,6 +23,12 @@ The server also publishes prompt templates for workflow selection:
 
 These are intended for MCP clients that want a reusable planning layer without inventing tool-routing policy on their own.
 
+## Tool-Level Planning
+
+The server also exposes `plan_experiment`, a meta-tool that ranks the MCP surface against a short natural-language scientific intent and returns an ordered tool chain without filling parameter values.
+
+Every MCP tool description now follows an intent-trigger style (`Use when ...`), and every tool response includes `related_tools` so the caller can inspect nearby next steps directly from the payload.
+
 ## New Tool Families
 
 ### Inverse / UQ

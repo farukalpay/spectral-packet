@@ -234,6 +234,15 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
         ),
     ),
     WorkflowIdentity(
+        workflow_id="official-benchmark-registry",
+        label="Official Benchmark Registry",
+        summary="Run the official deterministic benchmark suite and report error, timing, memory, mode budget, identifiability, and backend comparison evidence.",
+        surfaces=WorkflowSurfaceBindings(
+            python="run_benchmark_registry(...)",
+        ),
+        artifact_story="Writes benchmark_registry.json, benchmark_cases.csv, and artifacts.json through the shared artifact layer.",
+    ),
+    WorkflowIdentity(
         workflow_id="inspect-service-status",
         label="Inspect Service Status",
         summary="Inspect shared uptime, task counters, and recent execution history for machine-facing surfaces.",
@@ -241,6 +250,52 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
             python="inspect_service_status()",
             mcp="inspect_service_status",
             api="GET /status",
+        ),
+    ),
+    WorkflowIdentity(
+        workflow_id="forward-packet",
+        label="Forward Packet",
+        summary=(
+            "Propagate a bounded-domain packet and return density, uncertainty, density-matrix, and "
+            "phase-space diagnostics. The Python surface accepts a generic PacketState; MCP additionally "
+            "accepts explicit bounded-state specifications, while CLI and API currently expose the "
+            "single-packet Gaussian preparation subset."
+        ),
+        surfaces=WorkflowSurfaceBindings(
+            python="simulate_packet_state(...)",
+            cli="forward",
+            mcp="simulate_packet",
+            api="POST /forward",
+        ),
+        artifact_story="Writes forward-simulation artifacts through the shared artifact layer when an output directory is requested.",
+    ),
+    WorkflowIdentity(
+        workflow_id="project-packet",
+        label="Project Packet",
+        summary=(
+            "Project a bounded-domain packet onto the retained sine basis and return modal coefficients, "
+            "truncation diagnostics, density-matrix diagnostics, and phase-space diagnostics. The Python "
+            "surface accepts generic PacketState and SpectralState inputs; MCP additionally accepts explicit "
+            "bounded-state specifications, while CLI and API currently expose the single-packet Gaussian "
+            "preparation subset."
+        ),
+        surfaces=WorkflowSurfaceBindings(
+            python="project_packet_state(...)",
+            cli="project",
+            mcp="project_packet",
+            api="POST /project",
+        ),
+    ),
+    WorkflowIdentity(
+        workflow_id="compare-box-states",
+        label="Compare Box States",
+        summary=(
+            "Compare multiple bounded-domain candidate states in one shared workflow, returning per-state "
+            "forward diagnostics plus pairwise fidelity, trace-distance, momentum, and uncertainty summaries."
+        ),
+        surfaces=WorkflowSurfaceBindings(
+            python="compare_state_trajectories(...)",
+            mcp="compare_box_states",
         ),
     ),
     WorkflowIdentity(
@@ -365,6 +420,7 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
             python="optimize_packet_control(...)",
             cli="optimize-packet-control",
             mcp="optimize_packet_control",
+            api="POST /control/optimize",
         ),
         artifact_story="Writes optimization history, final density, and objective-gradient artifacts through the shared differentiable artifact layer.",
     ),
@@ -1048,7 +1104,7 @@ def inspect_product_identity() -> ProductIdentityReport:
         replaceability_risks=(
             "Without stronger goal-aware routing, the product can still look like a set of technically strong commands organized by transport boundary instead of by user outcome.",
             "Feature modeling and inverse reconstruction still risk feeling like optional add-ons unless the product keeps routing users through report-first loops.",
-            "Hidden or uncatalogued workflows reduce the credibility of the one-engine story and make custom glue feel safer than trusting the product defaults.",
+            "Surface mismatches between the generic Python packet workflows and narrower operational wrappers can still make prompt-side glue feel safer than trusting the product contract.",
         ),
         decision_burdens=(
             "Users still need help choosing between report, inverse-fit, and feature-model intents instead of only choosing between file and SQL inputs.",
@@ -1058,16 +1114,19 @@ def inspect_product_identity() -> ProductIdentityReport:
         glue_burdens=(
             "Users still have to join model labels explicitly after feature export.",
             "Cross-step continuation still depends on artifact inspection and workflow guidance rather than a single end-to-end chained workflow.",
-            "Some adoption-critical workflows existed in code before they were visible in the shared product catalog.",
+            "CLI and API packet wrappers are still narrower than the Python and MCP packet/state surfaces.",
         ),
         adoption_priorities=(
             "Make report-first, inverse reconstruction, and spectral feature-model loops the default product language across Python, CLI, MCP, and API.",
             "Push more intent-aware workflow guidance into MCP so clients ask for outcomes instead of inventing tool sequences.",
+            "Keep generic packet propagation, projection, and comparison visible in the shared workflow catalog even when some operational wrappers intentionally expose narrower packet subsets.",
             "Keep artifacts as the continuity layer so every high-value loop ends with inspectable outputs and a clear next step.",
         ),
         notes=(
             "Python is the primary surface; CLI, MCP, and API wrap the same shared workflows.",
             "File-backed and SQL-backed inputs converge through explicit table materialization before entering spectral workflows.",
+            "Generic packet projection, propagation, and state comparison are first-class Python workflows; MCP also accepts explicit bounded-state specifications for Gaussian, plane-wave, windowed plane-wave, box-mode, sampled-wavefunction, and spectral-coefficient inputs.",
+            "When execute_python is disabled in an MCP runtime, Lightcap should still rely on the dedicated bounded-state tools rather than assuming arbitrary local Python execution is available.",
             "Modal-surrogate and tree-model workflows remain extensions over the spectral spine rather than a separate product identity.",
             "The default adoption path is report-first: validate structure, analyze modes, compress, write artifacts, then choose inverse or feature-model follow-up workflows from evidence.",
         ),

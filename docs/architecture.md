@@ -46,12 +46,17 @@ The core mathematical engine lives in:
 
 - `src/spectral_packet_engine/domain.py`
 - `src/spectral_packet_engine/basis.py`
+- `src/spectral_packet_engine/physics_contracts.py`
 - `src/spectral_packet_engine/state.py`
 - `src/spectral_packet_engine/projector.py`
 - `src/spectral_packet_engine/dynamics.py`
 - `src/spectral_packet_engine/observables.py`
 - `src/spectral_packet_engine/simulation.py`
 - `src/spectral_packet_engine/inference.py`
+
+`physics_contracts.py` owns the shared `PotentialFamily`, `HamiltonianOperator`, `BasisSpec`, `BoundaryCondition`, `ObservableSet`, and `MeasurementModel` contract so forward, inverse, reduced-model, and surrogate workflows can refer to the same mathematical problem object.
+
+`state.py` owns packet-family preparation and bounded-support diagnostics. Gaussian packets remain a supported analytic family, but the core state layer is not Gaussian-only; reusable packet families and exact spectral-mode helpers project through the same spectral engine and surface explicit domain-support and boundary-mismatch evidence instead of burying those assumptions in interface wrappers.
 
 Advanced physics modules:
 
@@ -60,6 +65,7 @@ Advanced physics modules:
 - `src/spectral_packet_engine/split_operator.py` — split-operator propagation for time-dependent Schrödinger
 - `src/spectral_packet_engine/wigner.py` — Wigner quasi-probability distribution
 - `src/spectral_packet_engine/density_matrix.py` — density matrix formalism and quantum entropies
+- `src/spectral_packet_engine/open_systems.py` — Lindblad/open-system and finite-resolution measurement contracts
 - `src/spectral_packet_engine/greens_function.py` — spectral Green's function and LDOS
 - `src/spectral_packet_engine/perturbation.py` — quantum perturbation theory engine
 - `src/spectral_packet_engine/semiclassical.py` — WKB, Bohr-Sommerfeld, tunneling
@@ -73,7 +79,7 @@ Advanced physics modules:
 - `src/spectral_packet_engine/load_spectral.py` — spectral load modeling, adaptive throttling, anomaly detection
 - `src/spectral_packet_engine/parametric_potentials.py` — explicit parameterized potential families for inference and design
 - `src/spectral_packet_engine/uq.py` — shared local posterior, predictive-interval, and identifiability summaries
-- `src/spectral_packet_engine/reduced_models.py` — separable, structured-lift, coupled-channel, radial, and low-rank reduced-model surfaces
+- `src/spectral_packet_engine/reduced_models.py` — separable, near-separable, block-coupled, structured-lift, coupled-channel, radial, and low-rank reduced-model surfaces
 - `src/spectral_packet_engine/differentiable_physics.py` — differentiable calibration and inverse-design workflows
 - `src/spectral_packet_engine/vertical_workflows.py` — domain-specific spectroscopy, transport, control, and tabular verticals
 
@@ -86,9 +92,10 @@ Shared user-facing workflows live in:
 - `src/spectral_packet_engine/diagnostics.py`
 - `src/spectral_packet_engine/artifacts.py`
 - `src/spectral_packet_engine/release_gate.py`
+- `src/spectral_packet_engine/benchmark_registry.py`
 
 This layer is the conductor between the engine and the public interfaces.
-It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, and vertical workflows are surfaced before any interface wrapper sees them.
+It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, benchmark evidence, vertical workflows, shared packet/state diagnostics such as density-matrix and Wigner phase-space summaries, and multi-state boxed comparison workflows are surfaced before any interface wrapper sees them.
 
 ### 3. Data and storage bridge
 
@@ -96,9 +103,11 @@ Real user data enters through:
 
 - `src/spectral_packet_engine/table_io.py`
 - `src/spectral_packet_engine/tabular.py`
+- `src/spectral_packet_engine/spectral_dataset.py`
 - `src/spectral_packet_engine/database.py`
 
 These modules exist to make file-backed and SQL-backed data usable by the same engine workflows.
+`spectral_dataset.py` is the physics-aware dataset boundary for grid metadata, units, uncertainty, regime splits, content hashes, and artifact lineage; it does not replace the generic clean-table boundary.
 
 ### 4. Optional surrogate layer
 
@@ -119,6 +128,8 @@ The public wrappers live in:
 - `src/spectral_packet_engine/interfaces.py`
 
 These should stay thin. New product capability belongs in the workflow layer first, then in interface wrappers.
+
+The MCP surface may normalize explicit JSON state specifications into shared packet or spectral workflows, but the numerical logic still belongs in the library layer rather than in wrapper-local scripts or heuristics.
 
 ## Architectural Rules
 
@@ -151,7 +162,10 @@ Beta:
 Experimental:
 
 - TensorFlow compatibility workflows,
-- published transport-dataset benchmark path.
+- published transport-dataset benchmark path,
+- official benchmark registry,
+- open-system measurement contracts,
+- SpectralDataset contract.
 
 ## What The Repository Should Feel Like
 

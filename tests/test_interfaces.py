@@ -34,7 +34,11 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert product.json()["hero_workflow"]["workflow_id"] == "profile-table-report"
     assert len(product.json()["killer_workflows"]) == 3
     assert any(workflow["workflow_id"] == "infer-potential-spectrum" for workflow in product.json()["workflows"])
+    assert any(workflow["workflow_id"] == "forward-packet" for workflow in product.json()["workflows"])
+    assert any(workflow["workflow_id"] == "project-packet" for workflow in product.json()["workflows"])
+    assert any(workflow["workflow_id"] == "compare-box-states" for workflow in product.json()["workflows"])
     assert any(workflow["workflow_id"] == "profile-inference-workflow" for workflow in product.json()["workflows"])
+    assert any("execute_python is disabled" in note for note in product.json()["notes"])
 
     workflow_guide = client.get("/workflow/guide", params={"input_kind": "profile-table-sql", "goal": "feature-model"})
     assert workflow_guide.status_code == 200
@@ -222,6 +226,31 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert report_from_sql.json()["overview"]["analyze_num_modes"] == 4
     assert report_from_sql.json()["overview"]["compress_num_modes"] == 3
 
+    control = client.post(
+        "/control/optimize",
+        json={
+            "packet": {
+                "center": 0.25,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "phase": 0.0,
+            },
+            "objective": "interval_probability",
+            "target_value": 0.35,
+            "final_time": 0.004,
+            "interval": [0.5, 1.0],
+            "num_modes": 48,
+            "quadrature_points": 1024,
+            "grid_points": 64,
+            "steps": 20,
+            "learning_rate": 0.03,
+            "device": "cpu",
+        },
+    )
+    assert control.status_code == 200
+    assert control.json()["objective"] == "interval_probability"
+    assert control.json()["final_interval_probability"] is not None
+
     missing_db_query = client.post(
         "/database/query",
         json={
@@ -308,6 +337,7 @@ def test_mcp_runtime_report_is_explicit_about_transport_and_supervision() -> Non
     report = inspect_mcp_runtime(MCPServerConfig(max_concurrent_tasks=2, slot_acquire_timeout_seconds=5.0))
 
     assert report.transport == "stdio"
+    assert report.inspection_scope == "configured-runtime"
     assert report.stderr_logging_safe is True
     assert report.forced_cancellation_supported is False
     assert report.config.max_concurrent_tasks == 2
@@ -322,6 +352,7 @@ def test_mcp_runtime_report_is_explicit_about_transport_and_supervision() -> Non
         )
     )
     assert http_report.transport == "streamable-http"
+    assert http_report.inspection_scope == "configured-runtime"
     assert http_report.config.endpoint_url == "http://127.0.0.1:8765/mcp"
     assert http_report.recommended_supervision
     public_http_report = inspect_mcp_runtime(
@@ -408,6 +439,7 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "guide_workflow" in by_name
     assert "inspect_environment" in by_name
     assert "inspect_service_status" in by_name
+    assert "plan_experiment" in by_name
     assert "inspect_environment_tool" not in by_name
     assert "profile_table_report" in by_name
     assert "inspect_tree_backends" in by_name
@@ -430,8 +462,31 @@ def test_mcp_server_tool_metadata_is_product_shaped_when_available() -> None:
     assert "transport_workflow" in by_name
     assert "profile_inference_workflow" in by_name
     assert by_name["inspect_environment"].description
+    assert by_name["plan_experiment"].description.startswith("Use when")
     assert by_name["query_database"].description
+    assert by_name["compute_wigner_function"].description.startswith("Use when")
+    assert "quantum or classical" in by_name["compute_wigner_function"].description
     assert "read-only" in by_name["query_database"].description
+    assert by_name["inspect_product"].meta["http_bridge"]["paths"] == ["/inspect_product", "/Lightcap/inspect_product"]
+    assert "/Lightcap/tool_registry" in by_name["optimize_packet_control"].meta["http_bridge"]["registry_paths"]
+
+
+def test_streamable_http_tool_metadata_includes_path_scoped_bridges_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+    async def _list_tools():
+        server = create_mcp_server(MCPServerConfig(transport="streamable-http", streamable_http_path="/mcp", port=8766))
+        return await server.list_tools()
+
+    tools = asyncio.run(_list_tools())
+    by_name = {tool.name: tool for tool in tools}
+
+    inspect_product_bridge = by_name["inspect_product"].meta["http_bridge"]
+    assert "/inspect_product" in inspect_product_bridge["paths"]
+    assert "/mcp/inspect_product" in inspect_product_bridge["paths"]
+    assert "/mcp/tool_registry" in inspect_product_bridge["registry_paths"]
 
 
 def test_mcp_resources_and_prompts_expose_new_inverse_physics_capabilities_when_available() -> None:
@@ -479,6 +534,9 @@ def test_mcp_product_tool_reports_shared_identity_when_available() -> None:
     assert payload["product_name"] == "Spectral Packet Engine"
     assert payload["hero_workflow"]["workflow_id"] == "profile-table-report"
     assert len(payload["killer_workflows"]) == 3
+    assert any(workflow["workflow_id"] == "forward-packet" for workflow in payload["workflows"])
+    assert any(workflow["workflow_id"] == "compare-box-states" for workflow in payload["workflows"])
+    assert any("explicit bounded-state specifications" in note for note in payload["notes"])
 
 
 def test_mcp_workflow_guide_reports_operator_loop_when_available() -> None:
@@ -522,10 +580,166 @@ def test_mcp_runtime_and_artifact_tools_report_shared_runtime_state_when_availab
     runtime_payload, artifact_payload = asyncio.run(_inspect())
 
     assert runtime_payload["transport"] == "stdio"
+    assert runtime_payload["inspection_scope"] == "running-instance"
     assert runtime_payload["config"]["max_concurrent_tasks"] == 1
     assert runtime_payload["stderr_logging_safe"] is True
     assert artifact_payload["complete"] is True
     assert artifact_payload["metadata"]["workflow"] == "mcp-artifacts-test"
+
+
+def test_mcp_open_meteo_ingest_tool_persists_dataset_and_profile_when_available(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+    from spectral_packet_engine.table_io import ProfileTable
+    from spectral_packet_engine.tabular import TabularSource
+    from spectral_packet_engine.workflows import OpenMeteoIngestResult, summarize_profile_table, summarize_tabular_dataset
+
+    dataset = TabularDataset.from_rows(
+        [
+            {"time": 1_774_995_200.0, "time_iso8601": "2026-04-08T00:00:00Z", "temperature_2m": 12.5, "humidity": 71.0},
+            {"time": 1_774_998_800.0, "time_iso8601": "2026-04-08T01:00:00Z", "temperature_2m": 13.0, "humidity": 68.0},
+        ],
+        source=TabularSource(kind="open-meteo", location="https://example.invalid/open-meteo"),
+    )
+    profile_table = ProfileTable(
+        position_grid=[0.0, 1.0],
+        sample_times=[1_774_995_200.0, 1_774_998_800.0],
+        profiles=[[12.5, 71.0], [13.0, 68.0]],
+        source="https://example.invalid/open-meteo",
+    )
+    result = OpenMeteoIngestResult(
+        api_kind="forecast",
+        request_url="https://example.invalid/open-meteo",
+        latitude=41.01,
+        longitude=28.97,
+        elevation=39.0,
+        timezone="GMT",
+        utc_offset_seconds=0,
+        hourly_variables=("temperature_2m", "humidity"),
+        hourly_units={"time": "unixtime", "temperature_2m": "degC", "humidity": "%"},
+        dataset=dataset,
+        dataset_summary=summarize_tabular_dataset(dataset),
+        profile_materialization=None,
+        profile_table=profile_table,
+        profile_summary=summarize_profile_table(profile_table, device="cpu"),
+    )
+    monkeypatch.setattr("spectral_packet_engine.mcp.ingest_open_meteo_hourly_dataset", lambda **kwargs: result)
+
+    async def _call():
+        server = create_mcp_server(MCPServerConfig(scratch_directory=str(tmp_path)))
+        _, payload = await server.call_tool(
+            "ingest_open_meteo_hourly_dataset",
+            {
+                "latitude": 41.01,
+                "longitude": 28.97,
+                "start_date": "2026-04-08",
+                "end_date": "2026-04-08",
+                "hourly_variables": ["temperature_2m", "humidity"],
+                "dataset_filename": "weather.csv",
+                "profile_filename": "weather_profile.csv",
+                "position_columns": ["humidity", "temperature_2m"],
+                "position_values": [1.0, 0.0],
+            },
+        )
+        return payload
+
+    payload = asyncio.run(_call())
+
+    assert payload["api_kind"] == "forecast"
+    assert payload["dataset"]["row_count"] == 2
+    assert payload["profile_table"]["num_positions"] == 2
+    assert payload["dataset_path"].endswith("weather.csv")
+    assert payload["profile_path"].endswith("weather_profile.csv")
+    assert (tmp_path / "weather.csv").exists()
+    assert (tmp_path / "weather_profile.csv").exists()
+
+
+def test_mcp_derive_urban_microclimate_tool_persists_dataset_when_available(tmp_path) -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+    from spectral_packet_engine.tabular import save_tabular_dataset
+
+    dataset_path = tmp_path / "weather.csv"
+    save_tabular_dataset(
+        TabularDataset.from_rows(
+            [
+                {
+                    "temperature_2m": 28.0,
+                    "relative_humidity_2m": 55.0,
+                    "wind_speed_10m": 3.2,
+                    "surface_pressure": 100900.0,
+                    "shortwave_radiation": 650.0,
+                    "terrestrial_radiation": 410.0,
+                },
+                {
+                    "temperature_2m": 29.5,
+                    "relative_humidity_2m": 50.0,
+                    "wind_speed_10m": 4.1,
+                    "surface_pressure": 100850.0,
+                    "shortwave_radiation": 720.0,
+                    "terrestrial_radiation": 415.0,
+                },
+            ]
+        ),
+        dataset_path,
+    )
+
+    async def _call():
+        server = create_mcp_server(MCPServerConfig(scratch_directory=str(tmp_path)))
+        _, payload = await server.call_tool(
+            "derive_urban_microclimate",
+            {
+                "dataset_path": str(dataset_path),
+                "mapping_profile": "open-meteo",
+                "output_filename": "urban_microclimate.csv",
+            },
+        )
+        return payload
+
+    payload = asyncio.run(_call())
+
+    assert payload["summary"]["radiative_mode"] == "flux-balance"
+    assert payload["summary"]["row_count"] == 2
+    assert payload["dataset_path"].endswith("urban_microclimate.csv")
+    assert (tmp_path / "urban_microclimate.csv").exists()
+
+
+def test_mcp_tool_planner_and_related_tools_are_exposed_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _inspect():
+        server = create_mcp_server()
+        _, wigner_payload = await server.call_tool(
+            "compute_wigner_function",
+            {
+                "center": 0.4,
+                "width": 0.08,
+                "wavenumber": 18.0,
+                "num_modes": 16,
+                "num_x_points": 16,
+                "num_p_points": 16,
+                "device": "cpu",
+            },
+        )
+        _, plan_payload = await server.call_tool(
+            "plan_experiment",
+            {"intent": "analyze quantum tunneling behavior thoroughly", "max_steps": 4},
+        )
+        return wigner_payload, plan_payload
+
+    wigner_payload, plan_payload = asyncio.run(_inspect())
+
+    assert "related_tools" in wigner_payload
+    assert "analyze_quantum_state_pipeline" in wigner_payload["related_tools"]
+    assert "tunneling_experiment" in plan_payload["anchor_tool"]
+    assert plan_payload["plan_steps"]
+    assert plan_payload["plan_steps"][0]["tool"] == "tunneling_experiment"
+    assert isinstance(plan_payload["plan_steps"][0]["parameter_template"], dict)
+    assert all(value is None for value in plan_payload["plan_steps"][0]["parameter_template"].values())
 
 
 def test_mcp_profile_report_tool_uses_shared_report_workflow_when_available(tmp_path) -> None:

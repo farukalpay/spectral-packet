@@ -66,6 +66,27 @@ class DensityMatrixResult:
     is_pure: bool
 
 
+@dataclass(frozen=True, slots=True)
+class StateDensityMatrixDiagnostics:
+    """Density-matrix diagnostics for a state-vector representation.
+
+    ``trace`` and ``trace_defect`` capture norm leakage from projection or
+    truncation. The remaining fields are computed after explicit
+    renormalization so they answer a different question: whether the
+    represented state is still a pure state inside the retained Hilbert
+    subspace.
+    """
+
+    trace: Tensor
+    trace_defect: Tensor
+    trace_preserved: Tensor
+    normalized_purity: Tensor
+    normalized_von_neumann_entropy: Tensor
+    normalized_linear_entropy: Tensor
+    normalized_rank: Tensor
+    normalized_is_pure: Tensor
+
+
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
@@ -351,9 +372,73 @@ def analyze_density_matrix(
     )
 
 
+def analyze_state_density_matrix(
+    coefficients: Tensor,
+    *,
+    trace_tolerance: float = 1e-6,
+    purity_tolerance: float = 1e-6,
+    rank_threshold: float = 1e-10,
+) -> StateDensityMatrixDiagnostics:
+    """Analyze the density-matrix diagnostics implied by state coefficients.
+
+    The coefficients may carry leading batch dimensions. Diagnostics are
+    returned over those same leading dimensions.
+    """
+
+    state = coerce_tensor(coefficients)
+    if state.ndim == 0:
+        raise ValueError("coefficients must have at least one dimension")
+    if not torch.is_complex(state):
+        state = state.to(complex_dtype_for(state.dtype))
+
+    leading_shape = state.shape[:-1]
+    flat = state.reshape(-1, state.shape[-1])
+    real_dtype = flat.real.dtype
+    device = flat.device
+    trace = torch.sum(torch.abs(flat) ** 2, dim=-1).real
+    trace_defect = torch.abs(trace - 1.0)
+    trace_preserved = trace_defect <= torch.as_tensor(trace_tolerance, dtype=real_dtype, device=device)
+
+    normalized_purity = torch.zeros_like(trace)
+    normalized_von_neumann_entropy = torch.zeros_like(trace)
+    normalized_linear_entropy = torch.zeros_like(trace)
+    normalized_rank = torch.zeros(trace.shape, dtype=torch.int64, device=device)
+    normalized_is_pure = torch.zeros(trace.shape, dtype=torch.bool, device=device)
+    minimum_trace = torch.finfo(real_dtype).tiny
+
+    for index, vector in enumerate(flat):
+        current_trace = trace[index]
+        if float(current_trace.item()) <= minimum_trace:
+            continue
+        normalized_state = vector / torch.sqrt(current_trace)
+        result = analyze_density_matrix(
+            pure_state_density_matrix(normalized_state),
+            purity_tolerance=purity_tolerance,
+            rank_threshold=rank_threshold,
+        )
+        normalized_purity[index] = result.purity.real.to(dtype=real_dtype, device=device)
+        normalized_von_neumann_entropy[index] = result.von_neumann_entropy.real.to(dtype=real_dtype, device=device)
+        normalized_linear_entropy[index] = result.linear_entropy.real.to(dtype=real_dtype, device=device)
+        normalized_rank[index] = int(result.rank)
+        normalized_is_pure[index] = bool(result.is_pure)
+
+    return StateDensityMatrixDiagnostics(
+        trace=trace.reshape(leading_shape),
+        trace_defect=trace_defect.reshape(leading_shape),
+        trace_preserved=trace_preserved.reshape(leading_shape),
+        normalized_purity=normalized_purity.reshape(leading_shape),
+        normalized_von_neumann_entropy=normalized_von_neumann_entropy.reshape(leading_shape),
+        normalized_linear_entropy=normalized_linear_entropy.reshape(leading_shape),
+        normalized_rank=normalized_rank.reshape(leading_shape),
+        normalized_is_pure=normalized_is_pure.reshape(leading_shape),
+    )
+
+
 __all__ = [
     "DensityMatrixResult",
+    "StateDensityMatrixDiagnostics",
     "analyze_density_matrix",
+    "analyze_state_density_matrix",
     "fidelity",
     "mixed_state_density_matrix",
     "partial_trace",

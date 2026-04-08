@@ -72,3 +72,24 @@ def test_configured_service_logging_uses_stderr_not_stdout(capsys) -> None:
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "service_task_completed" in captured.err
+
+
+def test_configured_service_logging_falls_back_to_stderr_when_log_file_is_unwritable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    tmp_path,
+) -> None:
+    def _raise_permission_error(*args, **kwargs):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr("spectral_packet_engine.service_status.logging.FileHandler", _raise_permission_error)
+
+    configure_service_logging("INFO", log_file=tmp_path / "logs" / "mcp.log", force=True)
+
+    with track_service_task("stderr-fallback-test", interface="python"):
+        pass
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Falling back to stderr because service log file" in captured.err
+    assert "service_task_completed" in captured.err

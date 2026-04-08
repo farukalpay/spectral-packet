@@ -29,6 +29,10 @@ from spectral_packet_engine.datasets import (
     available_quantum_gas_transport_scans,
     download_and_prepare_quantum_gas_transport_scan,
 )
+from spectral_packet_engine.density_matrix import (
+    StateDensityMatrixDiagnostics,
+    analyze_state_density_matrix,
+)
 from spectral_packet_engine.diagnostics import (
     ProfileComparisonSummary,
     ReconstructionErrorSummary,
@@ -69,9 +73,20 @@ from spectral_packet_engine.ml import (
 from spectral_packet_engine.mcp_runtime import MCPRuntimeReport, inspect_mcp_runtime
 from spectral_packet_engine.observables import total_probability
 from spectral_packet_engine.parametric_potentials import (
+    ArtifactField,
+    Citation,
+    DifferentiabilityInfo,
+    ParameterPrior,
     available_potential_families,
     default_parameter_mapping,
     describe_potential_families,
+    families_for_workflow,
+)
+from spectral_packet_engine.pipelines import (
+    QuantumStateReport,
+    StateComparisonReport,
+    analyze_quantum_state,
+    compare_quantum_states,
 )
 from spectral_packet_engine.product import (
     DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
@@ -104,6 +119,8 @@ from spectral_packet_engine.simulation import simulate
 from spectral_packet_engine.state import (
     GaussianPacketParameters,
     PacketState,
+    PacketSupportDiagnostics,
+    SpectralState,
     make_truncated_gaussian_packet,
 )
 from spectral_packet_engine.table_io import (
@@ -155,6 +172,21 @@ from spectral_packet_engine.vertical_workflows import (
     run_profile_inference_workflow,
     run_spectroscopy_workflow,
     run_transport_resonance_workflow,
+)
+from spectral_packet_engine.weather import OpenMeteoHourlyDataset, fetch_open_meteo_hourly_dataset
+from spectral_packet_engine.urban_climate import (
+    HumanThermalResponseConfig,
+    UrbanBoundaryLayerConfig,
+    UrbanMicroclimateColumnMapping,
+    UrbanMicroclimateResult,
+    UrbanMicroclimateSummary,
+    UrbanRadiativeTransferConfig,
+    derive_urban_microclimate_dataset,
+    resolve_urban_microclimate_mapping,
+)
+from spectral_packet_engine.wigner import (
+    StatePhaseSpaceDiagnostics,
+    analyze_state_phase_space,
 )
 
 Tensor = torch.Tensor
@@ -270,6 +302,9 @@ def validate_installation(preferred_device: str | torch.device | None = "auto") 
         notes.append("The MCP runtime is available.")
     else:
         notes.append("The MCP runtime is not installed.")
+    notes.append(
+        "The validate-install MCP report describes the package-default MCP configuration surface; compare it with the live inspect_mcp_runtime tool on a running server to verify the active instance."
+    )
     notes.extend(environment.mcp_runtime.notes[:2])
     if environment.optional_features["sqlalchemy"]:
         notes.append("Remote SQL backends are available through SQLAlchemy.")
@@ -414,55 +449,150 @@ class ForwardSimulationSummary:
     grid: Tensor
     densities: Tensor
     expectation_position: Tensor
+    position_variance: Tensor
+    position_standard_deviation: Tensor
     left_probability: Tensor
     right_probability: Tensor
     total_probability: Tensor
     spectral_norm: Tensor
     spatial_norm: Tensor
+    density_matrix: StateDensityMatrixDiagnostics
+    phase_space: StatePhaseSpaceDiagnostics
     truncation: SpectralTruncationSummary
+    initial_support: PacketSupportDiagnostics | None
+    tracked_interval: Tensor | None = None
+    tracked_interval_probability: Tensor | None = None
 
 
-def _simulate_packet_with_context(
+def _coerce_packet_state_to_context(context: EngineContext, packet: PacketState) -> PacketState:
+    return PacketState(
+        domain=context.domain,
+        parameters=packet.parameters.to(dtype=context.domain.real_dtype, device=context.domain.device),
+        weights=packet.weights.to(dtype=context.domain.complex_dtype, device=context.domain.device),
+        normalize_components=packet.normalize_components,
+    )
+
+
+def _coerce_spectral_state_to_context(context: EngineContext, state: SpectralState) -> SpectralState:
+    coefficients = state.coefficients.to(dtype=context.domain.complex_dtype, device=context.domain.device)
+    current_modes = int(coefficients.shape[0])
+    target_modes = context.basis.num_modes
+    if current_modes > target_modes:
+        raise ValueError(
+            f"spectral state provides {current_modes} coefficients but the engine retains only {target_modes} modes"
+        )
+    if current_modes < target_modes:
+        padded = torch.zeros(target_modes, dtype=context.domain.complex_dtype, device=context.domain.device)
+        padded[:current_modes] = coefficients
+        coefficients = padded
+    return SpectralState(domain=context.domain, coefficients=coefficients)
+
+
+def _coerce_interval_to_context(
+    interval: Sequence[float] | Tensor | None,
+    *,
+    context: EngineContext,
+) -> tuple[float, float] | None:
+    if interval is None:
+        return None
+    interval_tensor = torch.as_tensor(interval, dtype=context.domain.real_dtype, device=context.domain.device).reshape(-1)
+    if interval_tensor.shape[0] != 2:
+        raise ValueError("interval must contain exactly two endpoints")
+    left = float(interval_tensor[0].item())
+    right = float(interval_tensor[1].item())
+    if right < left:
+        raise ValueError("interval requires right >= left")
+    return left, right
+
+
+def _domain_signature(domain: InfiniteWell1D) -> tuple[float, float, float, float]:
+    return (
+        float(domain.left.detach().cpu().item()),
+        float(domain.length.detach().cpu().item()),
+        float(domain.mass.detach().cpu().item()),
+        float(domain.hbar.detach().cpu().item()),
+    )
+
+
+def _simulate_state_with_context(
     context: EngineContext,
     *,
-    center: float,
-    width: float,
-    wavenumber: float,
-    phase: float = 0.0,
-    weight: complex = 1.0 + 0.0j,
+    initial_state: PacketState | SpectralState,
     evaluation_times: Tensor,
     grid: Tensor,
+    initial_support: PacketSupportDiagnostics | None,
+    interval: tuple[float, float] | None = None,
 ) -> ForwardSimulationSummary:
-    packet = make_packet_state(
-        context.domain,
-        center=center,
-        width=width,
-        wavenumber=wavenumber,
-        phase=phase,
-        weight=weight,
-    )
-    initial_state = context.projector.project_packet(packet)
+    if isinstance(initial_state, PacketState):
+        prepared_state = _coerce_packet_state_to_context(context, initial_state)
+        spectral_state = context.projector.project_packet(prepared_state)
+        initial_wavefunction = prepared_state.wavefunction(grid)
+    elif isinstance(initial_state, SpectralState):
+        prepared_state = _coerce_spectral_state_to_context(context, initial_state)
+        spectral_state = prepared_state
+        initial_wavefunction = prepared_state.wavefunction(grid)
+    else:
+        raise TypeError("initial_state must be a PacketState or SpectralState")
     record = simulate(
-        packet,
+        prepared_state,
         evaluation_times,
         projector=context.projector,
         propagator=context.propagator,
         grid=grid,
     )
     midpoint = context.domain.midpoint
-    initial_wavefunction = packet.wavefunction(grid)
+    position_variance = record.variance_position()
+    tracked_interval_probability = None if interval is None else record.interval_probability(interval[0], interval[1])
     return ForwardSimulationSummary(
         runtime=context.runtime,
         times=record.times,
         grid=grid,
         densities=record.densities if record.densities is not None else torch.empty(0, device=grid.device),
         expectation_position=record.expectation_position(),
+        position_variance=position_variance,
+        position_standard_deviation=torch.sqrt(torch.clamp(position_variance, min=0.0)),
         left_probability=record.interval_probability(context.domain.left, midpoint),
         right_probability=record.interval_probability(midpoint, context.domain.right),
         total_probability=record.total_probability(),
-        spectral_norm=initial_state.norm_squared,
+        spectral_norm=spectral_state.norm_squared,
         spatial_norm=total_probability(initial_wavefunction, grid),
-        truncation=summarize_spectral_coefficients(initial_state.coefficients),
+        density_matrix=analyze_state_density_matrix(record.coefficients),
+        phase_space=analyze_state_phase_space(record.coefficients, context.basis),
+        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+        initial_support=initial_support,
+        tracked_interval=None if interval is None else torch.tensor(interval, dtype=context.domain.real_dtype, device=context.domain.device),
+        tracked_interval_probability=tracked_interval_probability,
+    )
+
+
+def simulate_packet_state(
+    packet: PacketState,
+    *,
+    times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    grid_points: int = 512,
+    device: str | torch.device | None = "auto",
+) -> ForwardSimulationSummary:
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(packet.domain.length.detach().cpu().item()),
+        left=float(packet.domain.left.detach().cpu().item()),
+        mass=float(packet.domain.mass.detach().cpu().item()),
+        hbar=float(packet.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    grid = context.domain.grid(grid_points)
+    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
+    return _simulate_state_with_context(
+        context,
+        initial_state=packet,
+        evaluation_times=evaluation_times,
+        grid=grid,
+        initial_support=packet.support_diagnostics(),
+        interval=_coerce_interval_to_context(interval, context=context),
     )
 
 
@@ -474,27 +604,66 @@ def simulate_gaussian_packet(
     phase: float = 0.0,
     weight: complex = 1.0 + 0.0j,
     times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
     num_modes: int = 128,
     quadrature_points: int = 4096,
     grid_points: int = 512,
     device: str | torch.device | None = "auto",
 ) -> ForwardSimulationSummary:
-    context = build_engine(
-        num_modes=num_modes,
-        quadrature_points=quadrature_points,
-        device=device,
+    runtime = inspect_torch_runtime(device)
+    domain = InfiniteWell1D.from_length(
+        1.0,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
     )
-    grid = context.domain.grid(grid_points)
-    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
-    return _simulate_packet_with_context(
-        context,
+    packet = make_packet_state(
+        domain,
         center=center,
         width=width,
         wavenumber=wavenumber,
         phase=phase,
         weight=weight,
+    )
+    return simulate_packet_state(
+        packet,
+        times=times,
+        interval=interval,
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        grid_points=grid_points,
+        device=runtime.device,
+    )
+
+
+def simulate_spectral_state(
+    spectral_state: SpectralState,
+    *,
+    times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
+    num_modes: int | None = None,
+    quadrature_points: int = 4096,
+    grid_points: int = 512,
+    device: str | torch.device | None = "auto",
+) -> ForwardSimulationSummary:
+    resolved_num_modes = spectral_state.num_modes if num_modes is None else int(num_modes)
+    context = build_engine(
+        num_modes=resolved_num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(spectral_state.domain.length.detach().cpu().item()),
+        left=float(spectral_state.domain.left.detach().cpu().item()),
+        mass=float(spectral_state.domain.mass.detach().cpu().item()),
+        hbar=float(spectral_state.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    grid = context.domain.grid(grid_points)
+    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
+    return _simulate_state_with_context(
+        context,
+        initial_state=spectral_state,
         evaluation_times=evaluation_times,
         grid=grid,
+        initial_support=None,
+        interval=_coerce_interval_to_context(interval, context=context),
     )
 
 
@@ -504,7 +673,138 @@ class PacketProjectionSummary:
     coefficients: Tensor
     reconstruction_error: Tensor
     spectral_norm: Tensor
+    density_matrix: StateDensityMatrixDiagnostics
+    phase_space: StatePhaseSpaceDiagnostics
     truncation: SpectralTruncationSummary
+    initial_support: PacketSupportDiagnostics | None
+
+
+@dataclass(frozen=True, slots=True)
+class ComparedStateSummary:
+    label: str
+    representation: str
+    analysis: QuantumStateReport
+    forward: ForwardSimulationSummary
+
+
+@dataclass(frozen=True, slots=True)
+class StatePairComparisonSummary:
+    label_a: str
+    label_b: str
+    comparison: StateComparisonReport
+
+
+@dataclass(frozen=True, slots=True)
+class StateTrajectoryComparisonSummary:
+    interval: tuple[float, float] | None
+    states: tuple[ComparedStateSummary, ...]
+    pairs: tuple[StatePairComparisonSummary, ...]
+
+
+def project_packet_state(
+    packet: PacketState,
+    *,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    grid_points: int = 2048,
+    device: str | torch.device | None = "auto",
+) -> PacketProjectionSummary:
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(packet.domain.length.detach().cpu().item()),
+        left=float(packet.domain.left.detach().cpu().item()),
+        mass=float(packet.domain.mass.detach().cpu().item()),
+        hbar=float(packet.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    packet = _coerce_packet_state_to_context(context, packet)
+    spectral_state = context.projector.project_packet(packet)
+    grid = context.domain.grid(grid_points)
+    reference = packet.wavefunction(grid)
+    reconstruction = context.projector.reconstruct(spectral_state, grid)
+    reconstruction_error = torch.sqrt(total_probability(reconstruction - reference, grid))
+    return PacketProjectionSummary(
+        runtime=context.runtime,
+        coefficients=spectral_state.coefficients,
+        reconstruction_error=reconstruction_error,
+        spectral_norm=spectral_state.norm_squared,
+        density_matrix=analyze_state_density_matrix(spectral_state.coefficients),
+        phase_space=analyze_state_phase_space(spectral_state.coefficients, context.basis),
+        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+        initial_support=packet.support_diagnostics(),
+    )
+
+
+def project_wavefunction_state(
+    wavefunction,
+    grid,
+    *,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    device: str | torch.device | None = "auto",
+) -> PacketProjectionSummary:
+    spatial_grid = torch.as_tensor(grid, dtype=torch.float64)
+    if spatial_grid.ndim != 1:
+        raise ValueError("grid must be one-dimensional")
+    if spatial_grid.shape[0] < 2:
+        raise ValueError("grid must contain at least two points")
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float((spatial_grid[-1] - spatial_grid[0]).item()),
+        left=float(spatial_grid[0].item()),
+        device=device,
+    )
+    evaluation_grid = spatial_grid.to(dtype=context.domain.real_dtype, device=context.domain.device)
+    if not torch.all(evaluation_grid[1:] > evaluation_grid[:-1]).item():
+        raise ValueError("grid must be strictly increasing")
+    values = coerce_tensor(wavefunction, dtype=context.domain.complex_dtype, device=context.domain.device)
+    if values.ndim != 1:
+        raise ValueError("wavefunction must be one-dimensional")
+    spectral_state = context.projector.project_wavefunction(values, evaluation_grid)
+    reconstruction = context.projector.reconstruct(spectral_state, evaluation_grid)
+    reconstruction_error = torch.sqrt(total_probability(reconstruction - values, evaluation_grid))
+    return PacketProjectionSummary(
+        runtime=context.runtime,
+        coefficients=spectral_state.coefficients,
+        reconstruction_error=reconstruction_error,
+        spectral_norm=spectral_state.norm_squared,
+        density_matrix=analyze_state_density_matrix(spectral_state.coefficients),
+        phase_space=analyze_state_phase_space(spectral_state.coefficients, context.basis),
+        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+        initial_support=None,
+    )
+
+
+def project_spectral_state(
+    spectral_state: SpectralState,
+    *,
+    num_modes: int | None = None,
+    quadrature_points: int = 4096,
+    device: str | torch.device | None = "auto",
+) -> PacketProjectionSummary:
+    resolved_num_modes = spectral_state.num_modes if num_modes is None else int(num_modes)
+    context = build_engine(
+        num_modes=resolved_num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(spectral_state.domain.length.detach().cpu().item()),
+        left=float(spectral_state.domain.left.detach().cpu().item()),
+        mass=float(spectral_state.domain.mass.detach().cpu().item()),
+        hbar=float(spectral_state.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    prepared_state = _coerce_spectral_state_to_context(context, spectral_state)
+    return PacketProjectionSummary(
+        runtime=context.runtime,
+        coefficients=prepared_state.coefficients,
+        reconstruction_error=torch.zeros((), dtype=context.domain.real_dtype, device=context.domain.device),
+        spectral_norm=prepared_state.norm_squared,
+        density_matrix=analyze_state_density_matrix(prepared_state.coefficients),
+        phase_space=analyze_state_phase_space(prepared_state.coefficients, context.basis),
+        truncation=summarize_spectral_coefficients(prepared_state.coefficients),
+        initial_support=None,
+    )
 
 
 def project_gaussian_packet(
@@ -519,30 +819,121 @@ def project_gaussian_packet(
     grid_points: int = 2048,
     device: str | torch.device | None = "auto",
 ) -> PacketProjectionSummary:
-    context = build_engine(
-        num_modes=num_modes,
-        quadrature_points=quadrature_points,
-        device=device,
+    runtime = inspect_torch_runtime(device)
+    domain = InfiniteWell1D.from_length(
+        1.0,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
     )
     packet = make_packet_state(
-        context.domain,
+        domain,
         center=center,
         width=width,
         wavenumber=wavenumber,
         phase=phase,
         weight=weight,
     )
-    spectral_state = context.projector.project_packet(packet)
+    return project_packet_state(
+        packet,
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        grid_points=grid_points,
+        device=runtime.device,
+    )
+
+
+def compare_state_trajectories(
+    states: Mapping[str, PacketState | SpectralState] | Sequence[tuple[str, PacketState | SpectralState]],
+    *,
+    times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    grid_points: int = 512,
+    device: str | torch.device | None = "auto",
+) -> StateTrajectoryComparisonSummary:
+    if isinstance(states, Mapping):
+        named_states = list(states.items())
+    else:
+        named_states = list(states)
+    if len(named_states) < 2:
+        raise ValueError("compare_state_trajectories requires at least two labeled states")
+
+    reference_state = named_states[0][1]
+    reference_domain = reference_state.domain
+    reference_signature = _domain_signature(reference_domain)
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(reference_domain.length.detach().cpu().item()),
+        left=float(reference_domain.left.detach().cpu().item()),
+        mass=float(reference_domain.mass.detach().cpu().item()),
+        hbar=float(reference_domain.hbar.detach().cpu().item()),
+        device=device,
+    )
     grid = context.domain.grid(grid_points)
-    reference = packet.wavefunction(grid)
-    reconstruction = context.projector.reconstruct(spectral_state, grid)
-    reconstruction_error = torch.sqrt(total_probability(reconstruction - reference, grid))
-    return PacketProjectionSummary(
-        runtime=context.runtime,
-        coefficients=spectral_state.coefficients,
-        reconstruction_error=reconstruction_error,
-        spectral_norm=spectral_state.norm_squared,
-        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
+    tracked_interval = _coerce_interval_to_context(interval, context=context)
+
+    state_summaries: list[ComparedStateSummary] = []
+    spectral_states: list[tuple[str, SpectralState]] = []
+    for label, state in named_states:
+        if _domain_signature(state.domain) != reference_signature:
+            raise ValueError("all compared states must share the same bounded domain parameters")
+        if isinstance(state, PacketState):
+            forward = _simulate_state_with_context(
+                context,
+                initial_state=state,
+                evaluation_times=evaluation_times,
+                grid=grid,
+                initial_support=state.support_diagnostics(),
+                interval=tracked_interval,
+            )
+            spectral_state = context.projector.project_packet(_coerce_packet_state_to_context(context, state))
+            representation = "packet"
+        elif isinstance(state, SpectralState):
+            forward = _simulate_state_with_context(
+                context,
+                initial_state=state,
+                evaluation_times=evaluation_times,
+                grid=grid,
+                initial_support=None,
+                interval=tracked_interval,
+            )
+            spectral_state = _coerce_spectral_state_to_context(context, state)
+            representation = "spectral"
+        else:
+            raise TypeError("compare_state_trajectories accepts only PacketState or SpectralState values")
+
+        spectral_states.append((label, spectral_state))
+        state_summaries.append(
+            ComparedStateSummary(
+                label=label,
+                representation=representation,
+                analysis=analyze_quantum_state(spectral_state.coefficients, context.basis),
+                forward=forward,
+            )
+        )
+
+    pair_summaries: list[StatePairComparisonSummary] = []
+    for index, (label_a, state_a) in enumerate(spectral_states):
+        for label_b, state_b in spectral_states[index + 1 :]:
+            pair_summaries.append(
+                StatePairComparisonSummary(
+                    label_a=label_a,
+                    label_b=label_b,
+                    comparison=compare_quantum_states(
+                        state_a.coefficients,
+                        state_b.coefficients,
+                        context.basis,
+                    ),
+                )
+            )
+
+    return StateTrajectoryComparisonSummary(
+        interval=tracked_interval,
+        states=tuple(state_summaries),
+        pairs=tuple(pair_summaries),
     )
 
 
@@ -586,6 +977,24 @@ class TabularDatasetSummary:
     validation: TabularValidationReport
     supported_formats: dict[str, bool]
     preview_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OpenMeteoIngestResult:
+    api_kind: str
+    request_url: str
+    latitude: float
+    longitude: float
+    elevation: float | None
+    timezone: str
+    utc_offset_seconds: int
+    hourly_variables: tuple[str, ...]
+    hourly_units: dict[str, str]
+    dataset: TabularDataset
+    dataset_summary: TabularDatasetSummary
+    profile_materialization: ProfileTableMaterializationConfig | None
+    profile_table: ProfileTable | None
+    profile_summary: ProfileTableSummary | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,6 +1156,7 @@ def fit_gaussian_packet_to_profile_table_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     num_modes: int = 128,
     quadrature_points: int = 2048,
@@ -775,6 +1185,7 @@ def fit_gaussian_packet_to_profile_table_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -941,16 +1352,24 @@ def _coerce_profile_table_materialization_config(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     source: str | None = None,
 ) -> ProfileTableMaterializationConfig:
     if materialization is not None:
-        if position_columns is not None or sort_by_time or source is not None or time_column != "time":
+        if (
+            position_columns is not None
+            or position_values is not None
+            or sort_by_time
+            or source is not None
+            or time_column != "time"
+        ):
             raise ValueError("pass either materialization or explicit profile-table arguments, not both")
         return materialization
     return ProfileTableMaterializationConfig(
         time_column=time_column,
         position_columns=None if position_columns is None else tuple(position_columns),
+        position_values=None if position_values is None else tuple(position_values),
         sort_by_time=sort_by_time,
         source=source,
     )
@@ -981,6 +1400,7 @@ def database_profile_query_artifact_metadata(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
 ) -> dict[str, Any]:
     metadata = database_query_artifact_metadata(
@@ -992,11 +1412,13 @@ def database_profile_query_artifact_metadata(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
     )
     metadata["input"]["profile_table"] = {
         "time_column": resolved_materialization.time_column,
         "position_columns": resolved_materialization.position_columns,
+        "position_values": resolved_materialization.position_values,
         "sort_by_time": resolved_materialization.sort_by_time,
     }
     return metadata
@@ -1028,6 +1450,7 @@ def database_profile_query_workflow_artifact_metadata(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -1039,6 +1462,7 @@ def database_profile_query_workflow_artifact_metadata(
             materialization=materialization,
             time_column=time_column,
             position_columns=position_columns,
+            position_values=position_values,
             sort_by_time=sort_by_time,
         ),
     }
@@ -1057,6 +1481,125 @@ def summarize_tabular_dataset(dataset: TabularDataset) -> TabularDatasetSummary:
         validation=validation,
         supported_formats=supported_tabular_formats(),
         preview_rows=tuple(dataset.to_rows(limit=10)),
+    )
+
+
+def derive_urban_microclimate_from_tabular_dataset(
+    dataset: TabularDataset | str | Path,
+    *,
+    mapping_profile: str | None = None,
+    air_temperature_column: str | None = None,
+    relative_humidity_column: str | None = None,
+    wind_speed_column: str | None = None,
+    pressure_column: str | None = "surface_pressure",
+    shortwave_radiation_column: str | None = None,
+    longwave_radiation_column: str | None = None,
+    boundary_layer: UrbanBoundaryLayerConfig | None = None,
+    radiative_transfer: UrbanRadiativeTransferConfig | None = None,
+    human_thermal_response: HumanThermalResponseConfig | None = None,
+) -> UrbanMicroclimateResult:
+    loaded_dataset = _coerce_tabular_dataset_input(dataset)
+    mapping = resolve_urban_microclimate_mapping(
+        mapping_profile=mapping_profile,
+        air_temperature_column=air_temperature_column,
+        relative_humidity_column=relative_humidity_column,
+        wind_speed_column=wind_speed_column,
+        pressure_column=pressure_column,
+        shortwave_radiation_column=shortwave_radiation_column,
+        longwave_radiation_column=longwave_radiation_column,
+    )
+    return derive_urban_microclimate_dataset(
+        loaded_dataset,
+        mapping=mapping,
+        boundary_layer=boundary_layer,
+        radiative_transfer=radiative_transfer,
+        human_thermal_response=human_thermal_response,
+    )
+
+
+def ingest_open_meteo_hourly_dataset(
+    *,
+    latitude: float,
+    longitude: float,
+    start_date: str,
+    end_date: str,
+    hourly_variables: Sequence[str],
+    api_kind: str = "auto",
+    timezone_name: str = "GMT",
+    models: Sequence[str] | None = None,
+    temperature_unit: str | None = None,
+    wind_speed_unit: str | None = None,
+    precipitation_unit: str | None = None,
+    cell_selection: str | None = None,
+    elevation: float | None = None,
+    timeout_seconds: float = 30.0,
+    materialization: ProfileTableMaterializationConfig | None = None,
+    time_column: str = "time",
+    position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
+    sort_by_time: bool = False,
+) -> OpenMeteoIngestResult:
+    fetched: OpenMeteoHourlyDataset = fetch_open_meteo_hourly_dataset(
+        latitude=latitude,
+        longitude=longitude,
+        start_date=start_date,
+        end_date=end_date,
+        hourly_variables=hourly_variables,
+        api_kind=api_kind,
+        timezone_name=timezone_name,
+        models=models,
+        temperature_unit=temperature_unit,
+        wind_speed_unit=wind_speed_unit,
+        precipitation_unit=precipitation_unit,
+        cell_selection=cell_selection,
+        elevation=elevation,
+        timeout_seconds=timeout_seconds,
+    )
+    dataset_summary = summarize_tabular_dataset(fetched.dataset)
+    requested_materialization = (
+        materialization is not None
+        or position_columns is not None
+        or position_values is not None
+        or sort_by_time
+        or time_column != "time"
+    )
+    resolved_materialization = None
+    profile_table = None
+    profile_summary = None
+    if requested_materialization:
+        resolved_materialization = _coerce_profile_table_materialization_config(
+            materialization=materialization,
+            time_column=time_column,
+            position_columns=position_columns,
+            position_values=position_values,
+            sort_by_time=sort_by_time,
+            source=None if materialization is not None else fetched.request_url,
+        )
+        if resolved_materialization.source is None:
+            resolved_materialization = replace(
+                resolved_materialization,
+                source=fetched.request_url,
+            )
+        profile_table = profile_table_from_tabular_dataset(
+            fetched.dataset,
+            config=resolved_materialization,
+        )
+        profile_summary = summarize_profile_table(profile_table, device="cpu")
+    return OpenMeteoIngestResult(
+        api_kind=fetched.api_kind,
+        request_url=fetched.request_url,
+        latitude=fetched.latitude,
+        longitude=fetched.longitude,
+        elevation=fetched.elevation,
+        timezone=fetched.timezone,
+        utc_offset_seconds=fetched.utc_offset_seconds,
+        hourly_variables=fetched.hourly_variables,
+        hourly_units=fetched.hourly_units,
+        dataset=fetched.dataset,
+        dataset_summary=dataset_summary,
+        profile_materialization=resolved_materialization,
+        profile_table=profile_table,
+        profile_summary=profile_summary,
     )
 
 
@@ -1407,6 +1950,7 @@ def materialize_profile_table_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     create_if_missing: bool = False,
 ) -> DatabaseProfileTableMaterialization:
@@ -1421,6 +1965,7 @@ def materialize_profile_table_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
     )
     if resolved_materialization.source is None:
@@ -1462,6 +2007,7 @@ def _run_profile_table_workflow_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     create_if_missing: bool = False,
 ) -> _WorkflowResult:
@@ -1472,6 +2018,7 @@ def _run_profile_table_workflow_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -1680,6 +2227,7 @@ def analyze_profile_table_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     num_modes: int = 32,
     device: str | torch.device | None = "auto",
@@ -1699,6 +2247,7 @@ def analyze_profile_table_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -1712,6 +2261,7 @@ def compress_profile_table_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     num_modes: int = 32,
     device: str | torch.device | None = "auto",
@@ -1731,6 +2281,7 @@ def compress_profile_table_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -1953,6 +2504,7 @@ def export_feature_table_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     num_modes: int = 32,
     device: str | torch.device | None = "auto",
@@ -1993,6 +2545,7 @@ def export_feature_table_from_database_query(
                     materialization=materialization,
                     time_column=time_column,
                     position_columns=position_columns,
+                    position_values=position_values,
                     sort_by_time=sort_by_time,
                 )["input"],
                 includes=includes,
@@ -2012,6 +2565,7 @@ def export_feature_table_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -2450,6 +3004,7 @@ def train_modal_surrogate_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     num_modes: int,
     normalize_each_profile: bool = False,
@@ -2472,6 +3027,7 @@ def train_modal_surrogate_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -2486,6 +3042,7 @@ def evaluate_modal_surrogate_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     num_modes: int,
     normalize_each_profile: bool = False,
@@ -2508,6 +3065,7 @@ def evaluate_modal_surrogate_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -2557,6 +3115,7 @@ def build_profile_table_report_from_database_query(
     materialization: ProfileTableMaterializationConfig | None = None,
     time_column: str = "time",
     position_columns: Sequence[str] | None = None,
+    position_values: Sequence[float] | None = None,
     sort_by_time: bool = False,
     analyze_num_modes: int = DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
     compress_num_modes: int = DEFAULT_PROFILE_REPORT_COMPRESS_NUM_MODES,
@@ -2582,6 +3141,7 @@ def build_profile_table_report_from_database_query(
         materialization=materialization,
         time_column=time_column,
         position_columns=position_columns,
+        position_values=position_values,
         sort_by_time=sort_by_time,
         create_if_missing=create_if_missing,
     )
@@ -2608,14 +3168,19 @@ def simulate_packet_sweep(
     items: list[PacketSweepItemSummary] = []
     shared_times = evaluation_times.detach().cpu()
     for spec in packet_specs:
-        summary = _simulate_packet_with_context(
-            context,
+        packet = make_packet_state(
+            context.domain,
             center=float(spec["center"]),
             width=float(spec["width"]),
             wavenumber=float(spec["wavenumber"]),
             phase=float(spec.get("phase", 0.0)),
+        )
+        summary = _simulate_state_with_context(
+            context,
+            initial_state=packet,
             evaluation_times=evaluation_times,
             grid=grid,
+            initial_support=packet.support_diagnostics(),
         )
         items.append(
             PacketSweepItemSummary(
@@ -2640,6 +3205,7 @@ def simulate_packet_sweep(
 
 __all__ = [
     "CaptureModeBudget",
+    "ComparedStateSummary",
     "ControlObjective",
     "ControlWorkflowSummary",
     "CoupledChannelSurfaceSummary",
@@ -2658,6 +3224,7 @@ __all__ = [
     "LowRankFactorizationSummary",
     "ModalEvaluationSummary",
     "ModalTrainingSummary",
+    "OpenMeteoIngestResult",
     "ObservableGradientSummary",
     "PacketProjectionSummary",
     "PacketControlOptimizationSummary",
@@ -2676,6 +3243,8 @@ __all__ = [
     "ProfileTableSummary",
     "RadialReductionSummary",
     "SeparableSpectrumSummary",
+    "StatePairComparisonSummary",
+    "StateTrajectoryComparisonSummary",
     "SpectroscopyWorkflowSummary",
     "TabularDatasetSummary",
     "TensorFlowEvaluationSummary",
@@ -2683,6 +3252,12 @@ __all__ = [
     "TransitionDesignSummary",
     "TransportResonanceWorkflowSummary",
     "TransportBenchmarkSummary",
+    "UrbanBoundaryLayerConfig",
+    "UrbanMicroclimateColumnMapping",
+    "UrbanMicroclimateResult",
+    "UrbanMicroclimateSummary",
+    "UrbanRadiativeTransferConfig",
+    "HumanThermalResponseConfig",
     "analyze_profile_table_spectra",
     "analyze_profile_table_from_database_query",
     "analyze_coupled_channel_surfaces",
@@ -2694,6 +3269,7 @@ __all__ = [
     "calibrate_potential_from_spectrum",
     "coerce_database_table_types",
     "build_engine",
+    "compare_state_trajectories",
     "compare_profile_tables",
     "compute_packet_observable_gradient",
     "compress_profile_table",
@@ -2704,6 +3280,7 @@ __all__ = [
     "describe_potential_families",
     "design_potential_for_target_transition",
     "describe_database_table",
+    "derive_urban_microclimate_from_tabular_dataset",
     "execute_database_script",
     "execute_database_statement",
     "execute_database_query",
@@ -2715,6 +3292,7 @@ __all__ = [
     "fit_gaussian_packet_to_density",
     "fit_gaussian_packet_to_profile_table",
     "fit_gaussian_packet_to_profile_table_from_database_query",
+    "ingest_open_meteo_hourly_dataset",
     "available_potential_families",
     "infer_potential_family_from_spectrum",
     "inspect_database",
@@ -2727,6 +3305,9 @@ __all__ = [
     "load_profile_table_report",
     "load_tabular_dataset_from_path",
     "make_packet_state",
+    "project_spectral_state",
+    "project_wavefunction_state",
+    "project_packet_state",
     "materialize_database_query",
     "materialize_profile_table_from_database_query",
     "materialize_database_query_to_table",
@@ -2739,6 +3320,8 @@ __all__ = [
     "run_spectroscopy_workflow",
     "run_transport_resonance_workflow",
     "simulate_gaussian_packet",
+    "simulate_packet_state",
+    "simulate_spectral_state",
     "simulate_packet_sweep",
     "solve_radial_reduction",
     "summarize_database_query_result",

@@ -10,18 +10,27 @@ from spectral_packet_engine import (
     analyze_profile_table_spectra,
     build_profile_table_report,
     build_profile_table_report_from_database_query,
+    compare_state_trajectories,
     compare_profile_tables,
     export_feature_table_from_database_query,
     export_feature_table_from_profile_table,
     load_tabular_dataset,
+    make_box_mode_spectral_state,
+    make_plane_wave_packet,
+    make_windowed_plane_wave_packet,
     parquet_support_is_available,
     ProfileTable,
+    project_packet_state,
+    project_spectral_state,
+    project_wavefunction_state,
     TabularDataset,
     compress_profile_table,
     evaluate_tensorflow_surrogate_on_profile_table,
     fit_gaussian_packet_to_profile_table,
     save_tabular_dataset,
     simulate_gaussian_packet,
+    simulate_packet_state,
+    simulate_spectral_state,
     simulate_packet_sweep,
     summarize_profile_table,
     train_tree_model,
@@ -30,6 +39,7 @@ from spectral_packet_engine import (
     tune_tree_model,
     validate_installation,
     write_tabular_dataset_to_database,
+    InfiniteWell1D,
 )
 
 
@@ -116,6 +126,118 @@ def test_fit_gaussian_packet_to_profile_table_recovers_simulated_parameters() ->
     assert result.physical_inference.sensitivity is not None
 
 
+def test_generic_packet_workflows_support_plane_wave_family() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_plane_wave_packet(domain, wavenumber=9.0)
+
+    projection = project_packet_state(
+        packet,
+        num_modes=96,
+        quadrature_points=2048,
+        grid_points=512,
+        device="cpu",
+    )
+    forward = simulate_packet_state(
+        packet,
+        times=[0.0, 1e-3, 2e-3],
+        num_modes=96,
+        quadrature_points=2048,
+        grid_points=512,
+        device="cpu",
+    )
+
+    assert projection.coefficients.shape == (96,)
+    assert float(projection.reconstruction_error) < 0.15
+    assert torch.isclose(projection.density_matrix.normalized_purity, torch.tensor(1.0, dtype=torch.float64), atol=1e-10).item()
+    assert projection.density_matrix.normalized_is_pure.item() is True
+    assert projection.phase_space.W.shape == (64, 64)
+    assert torch.isclose(projection.phase_space.total_integral, projection.spectral_norm, atol=5e-2, rtol=5e-2).item()
+    assert projection.initial_support.outside_probability_mass[0].item() == pytest.approx(0.0)
+    assert projection.initial_support.boundary_density_mismatch[0].item() > 0.0
+    assert torch.allclose(forward.total_probability, torch.ones_like(forward.total_probability), atol=5e-3, rtol=5e-3)
+    assert forward.phase_space.W.shape == (3, 64, 64)
+    assert torch.allclose(forward.phase_space.total_integral, forward.total_probability, atol=5e-2, rtol=5e-2)
+
+
+def test_windowed_plane_wave_and_spectral_state_workflows_are_first_class() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_windowed_plane_wave_packet(
+        domain,
+        center=0.35,
+        window_width=0.24,
+        wavenumber=20.0,
+    )
+    mode_state = make_box_mode_spectral_state(domain, mode_index=8, num_modes=64)
+
+    projection = project_spectral_state(mode_state, num_modes=64, device="cpu")
+    forward_packet = simulate_packet_state(
+        packet,
+        times=[0.0, 1e-3],
+        interval=[0.55, 0.9],
+        num_modes=64,
+        quadrature_points=1024,
+        grid_points=128,
+        device="cpu",
+    )
+    forward_mode = simulate_spectral_state(
+        mode_state,
+        times=[0.0, 1e-3],
+        interval=[0.55, 0.9],
+        num_modes=64,
+        grid_points=128,
+        device="cpu",
+    )
+
+    assert float(projection.reconstruction_error) == pytest.approx(0.0)
+    assert projection.initial_support is None
+    assert forward_packet.initial_support is not None
+    assert forward_packet.tracked_interval_probability is not None
+    assert forward_packet.tracked_interval_probability.shape == forward_packet.times.shape
+    assert forward_mode.initial_support is None
+    assert forward_mode.tracked_interval_probability is not None
+    assert forward_mode.phase_space.W.shape == (2, 64, 64)
+    assert torch.allclose(forward_mode.total_probability, torch.ones_like(forward_mode.total_probability), atol=5e-3, rtol=5e-3)
+    assert float(packet.support_diagnostics().outside_probability_mass[0]) == pytest.approx(0.0)
+
+
+def test_project_wavefunction_state_and_compare_state_trajectories() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_windowed_plane_wave_packet(
+        domain,
+        center=0.35,
+        window_width=0.22,
+        wavenumber=18.0,
+    )
+    mode_state = make_box_mode_spectral_state(domain, mode_index=6, num_modes=64)
+    grid = domain.grid(256)
+    sampled = packet.wavefunction(grid)
+
+    projected = project_wavefunction_state(
+        sampled,
+        grid,
+        num_modes=64,
+        quadrature_points=1024,
+        device="cpu",
+    )
+    comparison = compare_state_trajectories(
+        [("windowed", packet), ("mode", mode_state)],
+        times=[0.0, 1e-3],
+        interval=[0.6, 0.95],
+        num_modes=64,
+        quadrature_points=1024,
+        grid_points=128,
+        device="cpu",
+    )
+
+    assert projected.initial_support is None
+    assert float(projected.reconstruction_error) < 5e-3
+    assert len(comparison.states) == 2
+    assert len(comparison.pairs) == 1
+    assert comparison.interval == pytest.approx((0.6, 0.95))
+    assert comparison.states[0].forward.tracked_interval_probability is not None
+    assert comparison.pairs[0].comparison.fidelity < 0.999
+
+
 def test_profile_table_summary_and_compression_sweep() -> None:
     table = _synthetic_profile_table()
 
@@ -146,6 +268,35 @@ def test_profile_table_report_exposes_hero_workflow_summary() -> None:
     assert report.overview.dominant_modes[0] >= 1
     assert report.overview.capture_mode_budgets[1].threshold == pytest.approx(0.95)
     assert report.overview.mean_relative_l2_error < 0.2
+
+
+def test_forward_simulation_summary_exposes_position_uncertainty_and_support() -> None:
+    forward = simulate_gaussian_packet(
+        center=0.22,
+        width=0.08,
+        wavenumber=14.0,
+        times=[0.0, 1e-3],
+        num_modes=64,
+        quadrature_points=1024,
+        grid_points=256,
+        device="cpu",
+    )
+
+    assert forward.position_variance.shape == forward.times.shape
+    assert forward.position_standard_deviation.shape == forward.times.shape
+    assert forward.density_matrix.trace.shape == forward.times.shape
+    assert forward.phase_space.W.shape == (2, 64, 64)
+    assert forward.phase_space.negativity.shape == forward.times.shape
+    assert torch.allclose(forward.phase_space.total_integral, forward.total_probability, atol=5e-2, rtol=5e-2)
+    assert torch.allclose(
+        forward.density_matrix.normalized_purity,
+        torch.ones_like(forward.density_matrix.normalized_purity),
+        atol=1e-10,
+        rtol=1e-10,
+    )
+    assert torch.all(forward.density_matrix.normalized_is_pure).item()
+    assert torch.all(forward.position_standard_deviation > 0).item()
+    assert forward.initial_support.inside_probability_mass.shape == (1,)
 
 
 def test_profile_table_report_from_database_query_matches_file_workflow(tmp_path) -> None:
@@ -262,6 +413,7 @@ def test_database_profile_query_workflow_artifact_metadata_keeps_profile_control
         parameters={"label": "test"},
         time_column="time",
         position_columns=["x=1.0", "x=0.0", "x=0.5"],
+        position_values=[1.0, 0.0, 0.5],
         sort_by_time=True,
     )
 
@@ -269,6 +421,7 @@ def test_database_profile_query_workflow_artifact_metadata_keeps_profile_control
     assert metadata["input"]["kind"] == "database-query"
     assert metadata["input"]["profile_table"]["time_column"] == "time"
     assert metadata["input"]["profile_table"]["position_columns"] == ("x=1.0", "x=0.0", "x=0.5")
+    assert metadata["input"]["profile_table"]["position_values"] == (1.0, 0.0, 0.5)
     assert metadata["input"]["profile_table"]["sort_by_time"] is True
 
 

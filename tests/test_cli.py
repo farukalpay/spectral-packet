@@ -101,6 +101,7 @@ def test_cli_env_emits_json(capsys) -> None:
     assert payload["torch_runtime"]["backend"] == "cpu"
     assert "tensorflow_available" in payload
     assert payload["mcp_runtime"]["transport"] == "stdio"
+    assert payload["mcp_runtime"]["inspection_scope"] == "package-default"
 
 
 def test_cli_product_report_emits_shared_identity_json(capsys) -> None:
@@ -140,8 +141,11 @@ def test_cli_help_and_version_surface(capsys) -> None:
     assert "export-features" in help_text
     assert "tree-train" in help_text
     assert "tree-tune" in help_text
+    assert "ingest-open-meteo" in help_text
+    assert "derive-urban-microclimate" in help_text
     assert "probe-mcp" in help_text
     assert "plan-mcp-tunnel" in help_text
+    assert "plan-mcp-ingress" in help_text
     assert "install-mcp-service" in help_text
     assert "infer-potential-spectrum" in help_text
     assert "analyze-separable-spectrum" in help_text
@@ -219,6 +223,196 @@ def test_cli_generate_mcp_config_and_install_service_dry_run(tmp_path, capsys) -
 
     exit_code = main(
         [
+            "plan-mcp-ingress",
+            "--public-host",
+            "lightcap.ai",
+            "--public-host",
+            "www.lightcap.ai",
+            "--upstream-port",
+            "8765",
+        ]
+    )
+    ingress_payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert ingress_payload["public_endpoint_url"] == "https://lightcap.ai/mcp"
+    assert ingress_payload["allowed_hosts"][:2] == ["lightcap.ai", "lightcap.ai:*"]
+    assert "server_name lightcap.ai www.lightcap.ai;" in ingress_payload["nginx_config"]
+    assert "location = /mcp {" in ingress_payload["nginx_location_snippet"]
+    assert ingress_payload["docker_environment"]["SPE_PUBLIC_HOSTS"] == "lightcap.ai,www.lightcap.ai"
+
+
+def test_cli_derive_urban_microclimate_emits_summary_and_writes_dataset(tmp_path, capsys) -> None:
+    dataset_path = tmp_path / "weather.csv"
+    output_path = tmp_path / "weather_microclimate.csv"
+    save_tabular_dataset(
+        TabularDataset.from_rows(
+            [
+                {
+                    "temperature_2m": 27.5,
+                    "relative_humidity_2m": 58.0,
+                    "wind_speed_10m": 3.4,
+                    "surface_pressure": 100950.0,
+                    "shortwave_radiation": 640.0,
+                    "terrestrial_radiation": 405.0,
+                },
+                {
+                    "temperature_2m": 28.1,
+                    "relative_humidity_2m": 56.0,
+                    "wind_speed_10m": 3.9,
+                    "surface_pressure": 100910.0,
+                    "shortwave_radiation": 690.0,
+                    "terrestrial_radiation": 408.0,
+                },
+            ]
+        ),
+        dataset_path,
+    )
+
+    exit_code = main(
+        [
+            "derive-urban-microclimate",
+            str(dataset_path),
+            "--mapping-profile",
+            "open-meteo",
+            "--output-path",
+            str(output_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["radiative_mode"] == "flux-balance"
+    assert payload["mapping"]["air_temperature_column"] == "temperature_2m"
+    assert payload["output_path"] == str(output_path)
+    assert output_path.exists()
+
+
+def test_cli_profile_table_commands_accept_explicit_semantic_position_layout(tmp_path, capsys) -> None:
+    path = tmp_path / "semantic_profiles.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "sample,h02,h00,h01",
+                "0.2,0.4,0.1,0.3",
+                "0.0,0.45,0.15,0.35",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "inspect-profile-table",
+            str(path),
+            "--time-column",
+            "sample",
+            "--position-column",
+            "h02",
+            "--position-value",
+            "1.0",
+            "--position-column",
+            "h00",
+            "--position-value",
+            "0.0",
+            "--position-column",
+            "h01",
+            "--position-value",
+            "0.5",
+            "--sort-by-time",
+            "--device",
+            "cpu",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["num_samples"] == 2
+    assert payload["num_positions"] == 3
+    assert payload["sample_time_min"] == 0.0
+    assert payload["sample_time_max"] == 0.2
+
+
+def test_cli_ingest_open_meteo_can_emit_and_persist_dataset(monkeypatch, tmp_path, capsys) -> None:
+    from spectral_packet_engine.tabular import TabularDataset, TabularSource
+    from spectral_packet_engine.workflows import OpenMeteoIngestResult, summarize_profile_table, summarize_tabular_dataset
+
+    dataset = TabularDataset.from_rows(
+        [
+            {"time": 1_774_995_200.0, "time_iso8601": "2026-04-08T00:00:00Z", "temperature_2m": 12.5, "humidity": 71.0},
+            {"time": 1_774_998_800.0, "time_iso8601": "2026-04-08T01:00:00Z", "temperature_2m": 13.0, "humidity": 68.0},
+        ],
+        source=TabularSource(kind="open-meteo", location="https://example.invalid/open-meteo"),
+    )
+    profile_table = ProfileTable(
+        position_grid=np.asarray([0.0, 1.0], dtype=np.float64),
+        sample_times=np.asarray([1_774_995_200.0, 1_774_998_800.0], dtype=np.float64),
+        profiles=np.asarray([[12.5, 71.0], [13.0, 68.0]], dtype=np.float64),
+        source="https://example.invalid/open-meteo",
+    )
+    result = OpenMeteoIngestResult(
+        api_kind="forecast",
+        request_url="https://example.invalid/open-meteo",
+        latitude=41.01,
+        longitude=28.97,
+        elevation=39.0,
+        timezone="GMT",
+        utc_offset_seconds=0,
+        hourly_variables=("temperature_2m", "humidity"),
+        hourly_units={"time": "unixtime", "temperature_2m": "degC", "humidity": "%"},
+        dataset=dataset,
+        dataset_summary=summarize_tabular_dataset(dataset),
+        profile_materialization=None,
+        profile_table=profile_table,
+        profile_summary=summarize_profile_table(profile_table, device="cpu"),
+    )
+
+    monkeypatch.setattr("spectral_packet_engine.cli.ingest_open_meteo_hourly_dataset", lambda **kwargs: result)
+
+    dataset_path = tmp_path / "weather.csv"
+    profile_path = tmp_path / "weather_profile.csv"
+    exit_code = main(
+        [
+            "ingest-open-meteo",
+            "--latitude",
+            "41.01",
+            "--longitude",
+            "28.97",
+            "--start-date",
+            "2026-04-08",
+            "--end-date",
+            "2026-04-08",
+            "--hourly",
+            "temperature_2m",
+            "--hourly",
+            "humidity",
+            "--position-column",
+            "humidity",
+            "--position-value",
+            "1.0",
+            "--position-column",
+            "temperature_2m",
+            "--position-value",
+            "0.0",
+            "--output-path",
+            str(dataset_path),
+            "--profile-output",
+            str(profile_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["api_kind"] == "forecast"
+    assert payload["dataset"]["row_count"] == 2
+    assert payload["profile_table"]["num_positions"] == 2
+    assert payload["output_path"] == str(dataset_path)
+    assert payload["profile_output"] == str(profile_path)
+    assert dataset_path.exists()
+    assert profile_path.exists()
+
+    exit_code = main(
+        [
             "install-mcp-service",
             "--working-directory",
             str(tmp_path),
@@ -268,6 +462,75 @@ def test_cli_validate_install_and_inspect_table(tmp_path, capsys) -> None:
     assert exit_code == 0
     assert payload["num_modes"] == 12
     assert "spectral_summary" in payload
+
+
+def test_cli_optimize_packet_control_accepts_interval_probability_objective(capsys) -> None:
+    exit_code = main(
+        [
+            "optimize-packet-control",
+            "--objective",
+            "interval_probability",
+            "--target-value",
+            "0.35",
+            "--final-time",
+            "0.004",
+            "--interval",
+            "0.5",
+            "1.0",
+            "--modes",
+            "48",
+            "--quadrature",
+            "1024",
+            "--grid",
+            "64",
+            "--steps",
+            "20",
+            "--learning-rate",
+            "0.03",
+            "--device",
+            "cpu",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["objective"] == "interval_probability"
+    assert payload["final_interval_probability"] is not None
+    assert payload["density_matrix"]["normalized_is_pure"] is True
+    assert "trace_defect" in payload["density_matrix"]
+    assert payload["phase_space"]["W"]
+    assert "negativity" in payload["phase_space"]
+
+
+def test_cli_forward_emits_phase_space_diagnostics(capsys) -> None:
+    exit_code = main(
+        [
+            "forward",
+            "--center",
+            "0.22",
+            "--width",
+            "0.08",
+            "--wavenumber",
+            "14.0",
+            "--times",
+            "0.0",
+            "0.001",
+            "--modes",
+            "32",
+            "--quadrature",
+            "256",
+            "--grid",
+            "64",
+            "--device",
+            "cpu",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["phase_space"]["negativity"]
+    assert len(payload["phase_space"]["W"]) == 2
+    assert "density_matrix" in payload
 
 
 def test_cli_inverse_physics_and_reduced_model_commands(tmp_path, capsys) -> None:
@@ -635,6 +898,55 @@ def test_cli_database_commands(tmp_path, capsys) -> None:
     report_index = json.loads((profile_report_dir / "artifacts.json").read_text(encoding="utf-8"))
     assert report_index["metadata"]["workflow"] == "profile-report"
     assert report_index["metadata"]["input"]["query"].startswith("SELECT time")
+
+
+def test_cli_sql_profile_commands_accept_explicit_semantic_position_layout(tmp_path, capsys) -> None:
+    from spectral_packet_engine import write_tabular_dataset_to_database
+
+    database_path = tmp_path / "semantic.sqlite"
+    write_tabular_dataset_to_database(
+        database_path,
+        "profiles",
+        TabularDataset.from_rows(
+            [
+                {"sample": 0.2, "h02": 0.4, "h00": 0.1, "h01": 0.3},
+                {"sample": 0.0, "h02": 0.45, "h00": 0.15, "h01": 0.35},
+            ]
+        ),
+        if_exists="replace",
+    )
+
+    exit_code = main(
+        [
+            "sql-analyze-table",
+            str(database_path),
+            'SELECT sample, h02, h00, h01 FROM "profiles"',
+            "--time-column",
+            "sample",
+            "--position-column",
+            "h02",
+            "--position-value",
+            "1.0",
+            "--position-column",
+            "h00",
+            "--position-value",
+            "0.0",
+            "--position-column",
+            "h01",
+            "--position-value",
+            "0.5",
+            "--sort-by-time",
+            "--modes",
+            "3",
+            "--device",
+            "cpu",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["num_modes"] == 3
+    assert payload["sample_times"] == [0.0, 0.2]
 
 
 def test_cli_ml_commands(tmp_path, capsys) -> None:

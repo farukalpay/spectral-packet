@@ -7,9 +7,11 @@ from spectral_packet_engine import (
     InfiniteWell1D,
     InfiniteWellBasis,
     PacketState,
+    PlaneWavePacketParameters,
     SpectralState,
     expectation_position,
     interval_probability,
+    make_plane_wave_packet,
     total_probability,
     variance_position,
     make_truncated_gaussian_packet,
@@ -70,6 +72,35 @@ def test_packet_state_supports_multiple_components() -> None:
     wavefunction = state.wavefunction(grid)
     assert wavefunction.shape == grid.shape
     assert torch.is_complex(wavefunction)
+
+
+def test_plane_wave_packet_is_normalized_on_domain() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_plane_wave_packet(domain, wavenumber=12.0)
+    grid = domain.grid(40001)
+
+    probability = total_probability(packet.wavefunction(grid), grid)
+    torch.testing.assert_close(probability, torch.tensor(1.0, dtype=domain.real_dtype), atol=2e-4, rtol=2e-4)
+
+
+def test_packet_support_diagnostics_are_explicit() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    gaussian = make_truncated_gaussian_packet(domain, center=0.08, width=0.12, wavenumber=8.0)
+    plane = PacketState(
+        domain=domain,
+        parameters=PlaneWavePacketParameters.single(
+            wavenumber=8.0,
+            dtype=domain.real_dtype,
+            device=domain.device,
+        ),
+    )
+
+    gaussian_support = gaussian.support_diagnostics()
+    plane_support = plane.support_diagnostics()
+
+    assert gaussian_support.outside_probability_mass[0].item() > 0.0
+    assert plane_support.outside_probability_mass[0].item() == 0.0
+    assert plane_support.boundary_density_mismatch[0].item() > 0.0
 
 
 def test_ground_state_observables_match_analytic_values() -> None:

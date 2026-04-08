@@ -4,9 +4,20 @@ from __future__ import annotations
 
 This module keeps the reusable local-Gaussian inference logic separate from
 packet-specific inverse estimation and potential-family calibration wrappers.
+
+The inference ladder is layered:
+
+Layer 0 (existing) — local Laplace/Gauss-Newton posterior summaries.
+Layer 1 — full Hessian diagnostics and Laplace model evidence.
+Layer 2 — multi-start identifiability atlas for detecting multimodality.
+
+Layer 3 (MCMC) lives in ``research_uq.py`` behind optional dependencies.
 """
 
+import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -90,6 +101,10 @@ class PosteriorConfig:
     compute_sensitivity: bool = True
     compute_observation_posterior: bool = True
     compute_observation_information: bool = True
+    # Layer 1: Hessian diagnostics and Laplace evidence
+    compute_hessian_diagnostics: bool = False
+    compute_laplace_evidence: bool = False
+    hessian_adequacy_threshold: float = 2.0
 
     def __post_init__(self) -> None:
         if self.noise_scale is not None and self.noise_scale <= 0:
@@ -100,6 +115,8 @@ class PosteriorConfig:
             raise ValueError("fisher_damping must be non-negative")
         if not (0.0 < self.confidence_level < 1.0):
             raise ValueError("confidence_level must lie strictly between 0 and 1")
+        if self.hessian_adequacy_threshold <= 0:
+            raise ValueError("hessian_adequacy_threshold must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +136,7 @@ class ParameterPosteriorSummary:
     identifiability_score: float
     noise_scale: float
     residual_rms: float
+    precision_matrix: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +168,59 @@ class ObservationInformationSummary:
     effective_observation_count: float
     peak_index: tuple[int, ...]
     peak_information_density: float
+
+
+# ---------------------------------------------------------------------------
+# Layer 1: Hessian diagnostics and Laplace evidence
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class HessianDiagnostics:
+    """Full Hessian vs Gauss-Newton comparison at a calibrated parameter point."""
+
+    gauss_newton_eigenvalues: torch.Tensor
+    full_hessian_eigenvalues: torch.Tensor
+    eigenvalue_ratio: torch.Tensor
+    max_eigenvalue_ratio: float
+    gauss_newton_adequate: bool
+    negative_curvature_detected: bool
+    adequacy_threshold: float
+
+
+@dataclass(frozen=True, slots=True)
+class LaplaceEvidence:
+    """Log marginal likelihood under the Laplace approximation."""
+
+    log_likelihood: float
+    log_occam_factor: float
+    log_marginal_likelihood: float
+    num_observations: int
+    num_parameters: int
+    noise_scale: float
+    bic: float
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: Multi-start identifiability atlas
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class IdentifiabilityAtlas:
+    """Multi-start calibration results clustered into parameter basins."""
+
+    num_starts: int
+    parameter_names: tuple[str, ...]
+    basin_labels: torch.Tensor
+    num_basins: int
+    basin_centers: torch.Tensor
+    basin_losses: torch.Tensor
+    basin_spreads: torch.Tensor
+    all_final_parameters: torch.Tensor
+    all_final_losses: torch.Tensor
+    global_best_index: int
+    multimodal: bool
 
 
 def summarize_parameter_posterior(
@@ -235,6 +306,7 @@ def summarize_parameter_posterior(
         identifiability_score=float(identifiability_score),
         noise_scale=float(noise_scale.detach()),
         residual_rms=float(residual_rms_tensor.detach()),
+        precision_matrix=precision.detach(),
     )
 
 
@@ -359,12 +431,220 @@ def summarize_observation_information(
     )
 
 
+# ---------------------------------------------------------------------------
+# Layer 1 computation functions
+# ---------------------------------------------------------------------------
+
+
+def compute_hessian_diagnostics(
+    *,
+    loss_fn: Callable[[torch.Tensor], torch.Tensor],
+    parameter_vector: torch.Tensor,
+    gauss_newton_eigenvalues: torch.Tensor,
+    adequacy_threshold: float = 2.0,
+) -> HessianDiagnostics:
+    """Compare full Hessian eigenvalues against the Gauss-Newton approximation.
+
+    The Gauss-Newton approximation (J^T J) drops second-order residual terms.
+    When the ratio of full Hessian eigenvalues to GN eigenvalues departs
+    significantly from 1, the local Gaussian posterior may be unreliable.
+    """
+    vector = parameter_vector.detach().requires_grad_(True)
+    full_hessian = torch.autograd.functional.hessian(loss_fn, vector)
+    full_hessian = full_hessian.detach().reshape(vector.shape[0], vector.shape[0])
+    full_hessian = 0.5 * (full_hessian + full_hessian.T)
+
+    full_eigenvalues = torch.linalg.eigvalsh(full_hessian)
+    gn_eigenvalues = gauss_newton_eigenvalues.to(
+        dtype=full_eigenvalues.dtype, device=full_eigenvalues.device,
+    )
+
+    eps = torch.finfo(full_eigenvalues.dtype).eps
+    safe_gn = torch.clamp(torch.abs(gn_eigenvalues), min=eps)
+    ratio = full_eigenvalues / safe_gn
+
+    max_ratio = float(torch.max(torch.abs(ratio)).item())
+    negative_curvature = bool(torch.any(full_eigenvalues < -eps).item())
+
+    return HessianDiagnostics(
+        gauss_newton_eigenvalues=gn_eigenvalues.detach(),
+        full_hessian_eigenvalues=full_eigenvalues.detach(),
+        eigenvalue_ratio=ratio.detach(),
+        max_eigenvalue_ratio=max_ratio,
+        gauss_newton_adequate=max_ratio < adequacy_threshold,
+        negative_curvature_detected=negative_curvature,
+        adequacy_threshold=adequacy_threshold,
+    )
+
+
+def compute_laplace_evidence(
+    *,
+    residual_vector: torch.Tensor,
+    noise_scale: float,
+    precision_matrix: torch.Tensor,
+    num_parameters: int,
+) -> LaplaceEvidence:
+    """Compute the Laplace approximation to the log marginal likelihood.
+
+    This is a better model-comparison score than BIC: it naturally includes
+    an Occam factor that penalises model complexity via the curvature of
+    the loss surface, not just parameter count.
+
+    log p(y|M) ≈ log_likelihood + log_occam_factor
+    """
+    residual = residual_vector.detach().reshape(-1).to(dtype=torch.float64)
+    n_obs = int(residual.numel())
+    sigma2 = float(noise_scale) ** 2
+
+    rss = float(torch.sum(residual ** 2).item())
+    log_likelihood = -0.5 * (n_obs * math.log(2 * math.pi * sigma2) + rss / sigma2)
+
+    precision = precision_matrix.detach().to(dtype=torch.float64)
+    precision_eigenvalues = torch.linalg.eigvalsh(precision)
+    eps = torch.finfo(precision_eigenvalues.dtype).eps
+    positive = precision_eigenvalues[precision_eigenvalues > eps]
+    if positive.numel() > 0:
+        log_det_precision = float(torch.sum(torch.log(positive)).item())
+    else:
+        log_det_precision = 0.0
+    log_occam_factor = 0.5 * (num_parameters * math.log(2 * math.pi) - log_det_precision)
+
+    log_marginal_likelihood = log_likelihood + log_occam_factor
+
+    # BIC for comparison
+    bic = n_obs * math.log(max(rss / n_obs, eps)) + num_parameters * math.log(n_obs)
+
+    return LaplaceEvidence(
+        log_likelihood=log_likelihood,
+        log_occam_factor=log_occam_factor,
+        log_marginal_likelihood=log_marginal_likelihood,
+        num_observations=n_obs,
+        num_parameters=num_parameters,
+        noise_scale=float(noise_scale),
+        bic=bic,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 computation functions
+# ---------------------------------------------------------------------------
+
+
+def _single_linkage_cluster(
+    points: torch.Tensor,
+    threshold: float,
+) -> torch.Tensor:
+    """Assign cluster labels via single-linkage agglomerative clustering.
+
+    Pure torch, no scipy/sklearn needed.  Returns integer labels tensor.
+    """
+    n = points.shape[0]
+    labels = torch.arange(n, device=points.device)
+
+    dists = torch.cdist(points.unsqueeze(0), points.unsqueeze(0)).squeeze(0)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if float(dists[i, j].item()) < threshold:
+                old_label = int(labels[j].item())
+                new_label = int(labels[i].item())
+                if old_label != new_label:
+                    labels[labels == old_label] = new_label
+
+    # Renumber to 0..k-1
+    unique_labels = torch.unique(labels)
+    remap = {int(old.item()): new_idx for new_idx, old in enumerate(unique_labels)}
+    return torch.tensor([remap[int(l.item())] for l in labels], device=points.device)
+
+
+def build_identifiability_atlas(
+    *,
+    parameter_names: tuple[str, ...],
+    calibration_fn: Callable[[Mapping[str, float]], tuple[dict[str, float], float]],
+    start_points: Sequence[Mapping[str, float]],
+    cluster_threshold: float | None = None,
+) -> IdentifiabilityAtlas:
+    """Run calibration from multiple starting points and cluster the results.
+
+    ``calibration_fn`` takes an initial-guess mapping and returns
+    ``(final_parameters_dict, final_loss)``.
+
+    Detects multiple basins of attraction in the loss landscape.  When
+    ``multimodal`` is True, the local Laplace posterior is unreliable and
+    sampling-based inference (Layer 3) is recommended.
+    """
+    all_params: list[list[float]] = []
+    all_losses: list[float] = []
+
+    for start in start_points:
+        final_params, final_loss = calibration_fn(start)
+        all_params.append([float(final_params[name]) for name in parameter_names])
+        all_losses.append(float(final_loss))
+
+    params_tensor = torch.tensor(all_params, dtype=torch.float64)
+    losses_tensor = torch.tensor(all_losses, dtype=torch.float64)
+    num_starts = params_tensor.shape[0]
+
+    # Normalize parameters for clustering
+    param_std = torch.std(params_tensor, dim=0)
+    param_std = torch.clamp(param_std, min=1e-12)
+    normalized = params_tensor / param_std
+
+    if cluster_threshold is None:
+        dists = torch.cdist(normalized.unsqueeze(0), normalized.unsqueeze(0)).squeeze(0)
+        diameter = float(torch.max(dists).item()) if num_starts > 1 else 1.0
+        cluster_threshold = 0.1 * max(diameter, 1e-12)
+
+    labels = _single_linkage_cluster(normalized, cluster_threshold)
+    num_basins = int(torch.unique(labels).numel())
+
+    basin_centers_list: list[list[float]] = []
+    basin_losses_list: list[float] = []
+    basin_spreads_list: list[list[float]] = []
+
+    for basin_id in range(num_basins):
+        mask = labels == basin_id
+        basin_params = params_tensor[mask]
+        basin_loss = losses_tensor[mask]
+        best_in_basin = int(torch.argmin(basin_loss).item())
+        basin_centers_list.append(basin_params[best_in_basin].tolist())
+        basin_losses_list.append(float(basin_loss[best_in_basin].item()))
+        if basin_params.shape[0] > 1:
+            basin_spreads_list.append(torch.std(basin_params, dim=0).tolist())
+        else:
+            basin_spreads_list.append([0.0] * len(parameter_names))
+
+    basin_centers = torch.tensor(basin_centers_list, dtype=torch.float64)
+    basin_losses_t = torch.tensor(basin_losses_list, dtype=torch.float64)
+    basin_spreads = torch.tensor(basin_spreads_list, dtype=torch.float64)
+    global_best = int(torch.argmin(basin_losses_t).item())
+
+    return IdentifiabilityAtlas(
+        num_starts=num_starts,
+        parameter_names=parameter_names,
+        basin_labels=labels.detach(),
+        num_basins=num_basins,
+        basin_centers=basin_centers.detach(),
+        basin_losses=basin_losses_t.detach(),
+        basin_spreads=basin_spreads.detach(),
+        all_final_parameters=params_tensor.detach(),
+        all_final_losses=losses_tensor.detach(),
+        global_best_index=global_best,
+        multimodal=num_basins > 1,
+    )
+
+
 __all__ = [
+    "HessianDiagnostics",
+    "IdentifiabilityAtlas",
+    "LaplaceEvidence",
     "ObservationInformationSummary",
     "ObservationPosteriorSummary",
     "ParameterPosteriorSummary",
     "PosteriorConfig",
     "SensitivityMapSummary",
+    "build_identifiability_atlas",
+    "compute_hessian_diagnostics",
+    "compute_laplace_evidence",
     "covariance_to_correlation",
     "flatten_real_view",
     "linearized_covariance",

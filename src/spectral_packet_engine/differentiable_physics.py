@@ -3,20 +3,28 @@ from __future__ import annotations
 """Differentiable physics workflows built directly on the spectral core."""
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence, cast
 
 import torch
 
 from spectral_packet_engine.basis import InfiniteWellBasis
+from spectral_packet_engine.density_matrix import (
+    StateDensityMatrixDiagnostics,
+    analyze_state_density_matrix,
+)
 from spectral_packet_engine.domain import InfiniteWell1D
 from spectral_packet_engine.dynamics import SpectralPropagator
 from spectral_packet_engine.eigensolver import solve_eigenproblem
 from spectral_packet_engine.uq import (
+    HessianDiagnostics,
+    LaplaceEvidence,
     ObservationInformationSummary,
     ObservationPosteriorSummary,
     ParameterPosteriorSummary,
     PosteriorConfig,
     SensitivityMapSummary,
+    compute_hessian_diagnostics,
+    compute_laplace_evidence,
     flatten_real_view,
     softplus_inverse,
     summarize_observation_information,
@@ -30,9 +38,27 @@ from spectral_packet_engine.projector import ProjectionConfig, StateProjector
 from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime
 from spectral_packet_engine.simulation import simulate
 from spectral_packet_engine.state import GaussianPacketParameters, make_truncated_gaussian_packet
+from spectral_packet_engine.wigner import (
+    StatePhaseSpaceDiagnostics,
+    analyze_state_phase_space,
+)
 
 Tensor = torch.Tensor
-ControlObjective = Literal["target_position", "target_interval_probability"]
+ControlObjective = Literal["position", "interval_probability"]
+ControlObjectiveInput = Literal["position", "interval_probability", "target_position", "target_interval_probability"]
+SUPPORTED_CONTROL_OBJECTIVES: tuple[ControlObjective, ...] = ("position", "interval_probability")
+ACCEPTED_CONTROL_OBJECTIVES: tuple[ControlObjectiveInput, ...] = (
+    "position",
+    "interval_probability",
+    "target_position",
+    "target_interval_probability",
+)
+_CONTROL_OBJECTIVE_ALIASES: dict[str, ControlObjective] = {
+    "position": "position",
+    "target_position": "position",
+    "interval_probability": "interval_probability",
+    "target_interval_probability": "interval_probability",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +88,8 @@ class PotentialCalibrationSummary:
     assumptions: tuple[str, ...]
     observation_posterior: ObservationPosteriorSummary | None = None
     observation_information: ObservationInformationSummary | None = None
+    hessian_diagnostics: HessianDiagnostics | None = None
+    laplace_evidence: LaplaceEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +131,8 @@ class PacketControlOptimizationSummary:
     final_density: Tensor
     final_expectation_position: float
     final_interval_probability: float | None
+    density_matrix: StateDensityMatrixDiagnostics
+    phase_space: StatePhaseSpaceDiagnostics
     assumptions: tuple[str, ...]
 
 
@@ -177,6 +207,16 @@ class _ConstrainedParameterization:
         return {spec.name: physical[index].reshape(()) for index, spec in enumerate(self.specs)}
 
 
+def normalize_control_objective(objective: str) -> ControlObjective:
+    normalized = _CONTROL_OBJECTIVE_ALIASES.get(objective)
+    if normalized is None:
+        supported = ", ".join(SUPPORTED_CONTROL_OBJECTIVES)
+        raise ValueError(
+            f"unsupported control objective: {objective}. Supported objectives: {supported}"
+        )
+    return cast(ControlObjective, normalized)
+
+
 def _run_optimization(
     *,
     raw_initial: Tensor,
@@ -230,6 +270,29 @@ def _solve_family_spectrum(
         num_states=num_states,
     )
     return result.eigenvalues
+
+
+def _calibration_assumptions(
+    hessian_diag: HessianDiagnostics | None,
+    laplace_ev: LaplaceEvidence | None,
+) -> tuple[str, ...]:
+    base = [
+        "The target data are matched by differentiating through the bounded-domain spectral eigensolver.",
+        "Posterior uncertainty is a local Laplace approximation around the calibrated parameter vector, not a global Bayesian posterior over model families.",
+    ]
+    if hessian_diag is not None:
+        if hessian_diag.gauss_newton_adequate:
+            base.append("Full Hessian analysis confirms the Gauss-Newton approximation is adequate at this parameter point.")
+        else:
+            base.append(
+                f"Full Hessian eigenvalue ratio ({hessian_diag.max_eigenvalue_ratio:.2f}) exceeds the "
+                f"adequacy threshold ({hessian_diag.adequacy_threshold:.1f}); the local Gaussian posterior may be unreliable."
+            )
+        if hessian_diag.negative_curvature_detected:
+            base.append("Negative curvature detected in the full Hessian — the calibrated point may not be a local minimum.")
+    if laplace_ev is not None:
+        base.append("Model comparison uses the Laplace approximation to the log marginal likelihood, which naturally penalises complexity via the Occam factor.")
+    return tuple(base)
 
 
 def calibrate_potential_from_spectrum(
@@ -293,6 +356,8 @@ def calibrate_potential_from_spectrum(
     sensitivity: SensitivityMapSummary | None = None
     observation_posterior: ObservationPosteriorSummary | None = None
     observation_information: ObservationInformationSummary | None = None
+    hessian_diag: HessianDiagnostics | None = None
+    laplace_ev: LaplaceEvidence | None = None
     resolved_posterior = posterior_config
     if resolved_posterior is not None and resolved_posterior.enabled:
         differentiable_vector = parameter_vector.detach().clone().requires_grad_(True)
@@ -335,6 +400,23 @@ def calibrate_potential_from_spectrum(
                 observation_jacobian=observation_jacobian,
                 noise_scale=parameter_posterior.noise_scale,
             )
+        if resolved_posterior.compute_hessian_diagnostics:
+            def _scalar_loss(v: Tensor) -> Tensor:
+                pred = _solve_family_spectrum(family_def, domain, v, num_points=num_points, num_states=int(target.shape[0]))
+                return torch.mean((pred - target.detach()) ** 2)
+            hessian_diag = compute_hessian_diagnostics(
+                loss_fn=_scalar_loss,
+                parameter_vector=differentiable_vector,
+                gauss_newton_eigenvalues=parameter_posterior.information_eigenvalues,
+                adequacy_threshold=resolved_posterior.hessian_adequacy_threshold,
+            )
+        if resolved_posterior.compute_laplace_evidence and parameter_posterior.precision_matrix is not None:
+            laplace_ev = compute_laplace_evidence(
+                residual_vector=residual_vector,
+                noise_scale=parameter_posterior.noise_scale,
+                precision_matrix=parameter_posterior.precision_matrix,
+                num_parameters=len(family_def.parameter_names),
+            )
 
     return PotentialCalibrationSummary(
         family=family_def.name,
@@ -350,12 +432,11 @@ def calibrate_potential_from_spectrum(
         history=history,
         parameter_posterior=parameter_posterior,
         sensitivity=sensitivity,
-        assumptions=(
-            "The target data are matched by differentiating through the bounded-domain spectral eigensolver.",
-            "Posterior uncertainty is a local Laplace approximation around the calibrated parameter vector, not a global Bayesian posterior over model families.",
-        ),
+        assumptions=_calibration_assumptions(hessian_diag, laplace_ev),
         observation_posterior=observation_posterior,
         observation_information=observation_information,
+        hessian_diagnostics=hessian_diag,
+        laplace_evidence=laplace_ev,
     )
 
 
@@ -473,6 +554,7 @@ def _packet_observable(
     target_value: Tensor,
     interval: tuple[float, float] | None,
 ) -> tuple[Tensor, torch.Tensor, torch.Tensor]:
+    objective = normalize_control_objective(objective)
     packet = make_truncated_gaussian_packet(
         domain,
         center=parameter_vector[0],
@@ -492,12 +574,12 @@ def _packet_observable(
     final_wavefunction = record.wavefunctions[0]
     final_density = record.densities[0]
     final_expectation_position = expectation_position(final_wavefunction, observation_grid)
-    if objective == "target_position":
+    if objective == "position":
         loss = (final_expectation_position - target_value) ** 2
         objective_value = final_expectation_position
-    elif objective == "target_interval_probability":
+    elif objective == "interval_probability":
         if interval is None:
-            raise ValueError("interval must be provided for target_interval_probability")
+            raise ValueError("interval must be provided for interval_probability control")
         interval_probability = record.interval_probability(interval[0], interval[1])[0]
         loss = (interval_probability - target_value) ** 2
         objective_value = interval_probability
@@ -509,7 +591,7 @@ def _packet_observable(
 def compute_packet_observable_gradient(
     *,
     initial_guess: Mapping[str, float],
-    objective: ControlObjective,
+    objective: ControlObjectiveInput,
     target_value: float,
     final_time: float,
     interval: tuple[float, float] | None = None,
@@ -518,6 +600,7 @@ def compute_packet_observable_gradient(
     grid_points: int = 128,
     device: str | torch.device = "auto",
 ) -> ObservableGradientSummary:
+    normalized_objective = normalize_control_objective(objective)
     runtime = inspect_torch_runtime(device)
     domain = InfiniteWell1D.from_length(1.0, dtype=runtime.preferred_real_dtype, device=runtime.device)
     basis = InfiniteWellBasis(domain, num_modes)
@@ -535,7 +618,7 @@ def compute_packet_observable_gradient(
         propagator=propagator,
         observation_grid=observation_grid,
         final_time=final_time_tensor,
-        objective=objective,
+        objective=normalized_objective,
         target_value=target_tensor,
         interval=interval,
     )
@@ -543,7 +626,7 @@ def compute_packet_observable_gradient(
     return ObservableGradientSummary(
         parameter_names=("center", "width", "wavenumber", "phase"),
         parameter_values=parameter_vector.detach(),
-        objective_name=objective,
+        objective_name=normalized_objective,
         objective_value=float(objective_value.detach()),
         gradient=gradient,
     )
@@ -552,7 +635,7 @@ def compute_packet_observable_gradient(
 def optimize_packet_control(
     *,
     initial_guess: Mapping[str, float],
-    objective: ControlObjective,
+    objective: ControlObjectiveInput,
     target_value: float,
     final_time: float,
     interval: tuple[float, float] | None = None,
@@ -562,6 +645,7 @@ def optimize_packet_control(
     optimization_config: GradientOptimizationConfig = GradientOptimizationConfig(),
     device: str | torch.device = "auto",
 ) -> PacketControlOptimizationSummary:
+    normalized_objective = normalize_control_objective(objective)
     runtime = inspect_torch_runtime(device)
     domain = InfiniteWell1D.from_length(1.0, dtype=runtime.preferred_real_dtype, device=runtime.device)
     basis = InfiniteWellBasis(domain, num_modes)
@@ -582,7 +666,7 @@ def optimize_packet_control(
             propagator=propagator,
             observation_grid=observation_grid,
             final_time=final_time_tensor,
-            objective=objective,
+            objective=normalized_objective,
             target_value=target_tensor,
             interval=interval,
         )
@@ -601,7 +685,7 @@ def optimize_packet_control(
         propagator=propagator,
         observation_grid=observation_grid,
         final_time=final_time_tensor,
-        objective=objective,
+        objective=normalized_objective,
         target_value=target_tensor,
         interval=interval,
     )
@@ -633,7 +717,7 @@ def optimize_packet_control(
             "wavenumber": float(parameter_vector[2].item()),
             "phase": float(parameter_vector[3].item()),
         },
-        objective=objective,
+        objective=normalized_objective,
         target_value=target_value,
         final_time=final_time,
         interval=interval,
@@ -644,7 +728,7 @@ def optimize_packet_control(
     )
 
     return PacketControlOptimizationSummary(
-        objective=objective,
+        objective=normalized_objective,
         optimized_parameters=GaussianPacketParameters.single(
             center=parameter_vector[0],
             width=parameter_vector[1],
@@ -664,6 +748,8 @@ def optimize_packet_control(
         final_density=final_density.detach(),
         final_expectation_position=final_expectation_position,
         final_interval_probability=final_interval_probability,
+        density_matrix=analyze_state_density_matrix(record.coefficients[0]),
+        phase_space=analyze_state_phase_space(record.coefficients[0], basis),
         assumptions=(
             "This workflow optimizes initial packet preparation parameters, not an arbitrary time-dependent control pulse.",
             "Gradients are computed through the bounded-domain spectral projection and propagation stack implemented in PyTorch.",
@@ -672,14 +758,18 @@ def optimize_packet_control(
 
 
 __all__ = [
+    "ACCEPTED_CONTROL_OBJECTIVES",
     "ControlObjective",
+    "ControlObjectiveInput",
     "GradientOptimizationConfig",
     "ObservableGradientSummary",
     "PacketControlOptimizationSummary",
     "PotentialCalibrationSummary",
+    "SUPPORTED_CONTROL_OBJECTIVES",
     "TransitionDesignSummary",
     "calibrate_potential_from_spectrum",
     "compute_packet_observable_gradient",
     "design_potential_for_target_transition",
+    "normalize_control_objective",
     "optimize_packet_control",
 ]

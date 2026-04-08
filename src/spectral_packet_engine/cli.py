@@ -33,6 +33,7 @@ from spectral_packet_engine.artifacts import (
 )
 from spectral_packet_engine.mcp_runtime import MCPServerConfig
 from spectral_packet_engine.ml import ModalSurrogateConfig
+from spectral_packet_engine.differentiable_physics import ACCEPTED_CONTROL_OBJECTIVES
 from spectral_packet_engine.product import (
     DEFAULT_MCP_LOG_LEVEL,
     DEFAULT_MCP_MAX_CONCURRENT_TASKS,
@@ -46,8 +47,8 @@ from spectral_packet_engine.product import (
     inspect_product_identity,
 )
 from spectral_packet_engine.release_gate import run_release_gate
-from spectral_packet_engine.tabular import load_tabular_dataset
-from spectral_packet_engine.table_io import load_profile_table
+from spectral_packet_engine.tabular import load_tabular_dataset, save_tabular_dataset
+from spectral_packet_engine.table_io import load_profile_table, save_profile_table
 from spectral_packet_engine.tf_surrogate import TensorFlowRegressorConfig
 from spectral_packet_engine.workflows import (
     analyze_coupled_channel_surfaces,
@@ -55,6 +56,7 @@ from spectral_packet_engine.workflows import (
     analyze_profile_table_from_database_query,
     analyze_separable_tensor_product_spectrum,
     benchmark_transport_scan,
+    build_profile_table_report,
     build_profile_table_report_from_database_query,
     bootstrap_local_database,
     compare_profile_tables,
@@ -63,6 +65,7 @@ from spectral_packet_engine.workflows import (
     database_profile_query_workflow_artifact_metadata,
     database_query_workflow_artifact_metadata,
     describe_database_table,
+    derive_urban_microclimate_from_tabular_dataset,
     design_potential_for_target_transition,
     execute_database_script,
     execute_database_statement,
@@ -73,12 +76,13 @@ from spectral_packet_engine.workflows import (
     fit_gaussian_packet_to_profile_table,
     fit_gaussian_packet_to_profile_table_from_database_query,
     GradientOptimizationConfig,
+    HumanThermalResponseConfig,
     infer_potential_family_from_spectrum,
     inspect_database,
     inspect_environment,
     inspect_ml_backend_support,
     inspect_tree_backend_support,
-    load_profile_table_report,
+    ingest_open_meteo_hourly_dataset,
     load_tabular_dataset_from_path,
     materialize_database_query,
     materialize_database_query_to_table,
@@ -101,6 +105,8 @@ from spectral_packet_engine.workflows import (
     evaluate_modal_surrogate_on_profile_table,
     train_tensorflow_surrogate_on_profile_table,
     tune_tree_model,
+    UrbanBoundaryLayerConfig,
+    UrbanRadiativeTransferConfig,
     validate_installation,
     write_tabular_dataset_to_database,
 )
@@ -189,6 +195,67 @@ def _prompt_yes_no(prompt: str, *, default: bool = False) -> bool:
     if not response:
         return default
     return response in {"y", "yes"}
+
+
+def _add_profile_table_materialization_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--time-column",
+        default="time",
+        help="Column to treat as sample time when materializing non-canonical profile-table inputs.",
+    )
+    parser.add_argument(
+        "--position-column",
+        dest="position_columns",
+        action="append",
+        default=None,
+        help="Explicit profile-value column. Repeat to preserve semantic source columns such as h00, h01, ...",
+    )
+    parser.add_argument(
+        "--position-value",
+        dest="position_values",
+        action="append",
+        type=float,
+        default=None,
+        help="Numeric coordinate for each --position-column. Repeat in the same order as --position-column.",
+    )
+    parser.add_argument("--sort-by-time", action="store_true", help="Sort rows by the resolved time column before materializing the profile table.")
+
+
+def _add_sql_profile_table_materialization_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--time-column", default="time", help="Column to treat as sample time when materializing a profile-table-shaped SQL result.")
+    parser.add_argument(
+        "--position-column",
+        action="append",
+        dest="position_columns",
+        default=None,
+        help="Explicit profile-value column from the SQL result. Repeat to preserve semantic source columns.",
+    )
+    parser.add_argument(
+        "--position-value",
+        dest="position_values",
+        action="append",
+        type=float,
+        default=None,
+        help="Numeric coordinate for each --position-column. Repeat in the same order as --position-column.",
+    )
+    parser.add_argument(
+        "--sort-by-time",
+        action="store_true",
+        help="Sort materialized query rows by the resolved time column before entering the spectral workflow.",
+    )
+
+
+def _profile_table_load_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "time_column": args.time_column,
+        "position_columns": args.position_columns,
+        "position_values": args.position_values,
+        "sort_by_time": args.sort_by_time,
+    }
+
+
+def _load_profile_table_from_cli_args(path: str | Path, args: argparse.Namespace):
+    return load_profile_table(path, **_profile_table_load_kwargs(args))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -362,6 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect_table_parser.add_argument("table_path", type=Path)
     inspect_table_parser.add_argument("--device", default="auto")
+    _add_profile_table_materialization_arguments(inspect_table_parser)
 
     profile_report_parser = _add_command_parser(
         subparsers,
@@ -383,6 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_report_parser.add_argument("--device", default="auto")
     profile_report_parser.add_argument("--normalize", action="store_true")
     profile_report_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(profile_report_parser)
 
     export_features_parser = _add_command_parser(
         subparsers,
@@ -411,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_features_parser.add_argument("--format", choices=["csv", "parquet"], default="csv")
     export_features_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(export_features_parser)
 
     tabular_inspect_parser = subparsers.add_parser(
         "inspect-tabular-dataset",
@@ -418,6 +488,84 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect a CSV, TSV, JSON, and optionally Parquet or XLSX tabular dataset.",
     )
     tabular_inspect_parser.add_argument("dataset_path", type=Path)
+
+    open_meteo_parser = _add_command_parser(
+        subparsers,
+        "ingest-open-meteo",
+        help_text="Fetch hourly Open-Meteo data into the shared tabular/profile-table contract.",
+        description=(
+            "Retrieve hourly meteorology data from Open-Meteo, normalize it into a shared "
+            "TabularDataset, and optionally materialize selected variables into a ProfileTable."
+        ),
+        epilog=(
+            "Example:\n"
+            "  spectral-packet-engine ingest-open-meteo --latitude 41.01 --longitude 28.97 "
+            "--start-date 2026-04-01 --end-date 2026-04-03 --hourly temperature_2m "
+            "--hourly relative_humidity_2m --output-path artifacts/weather.csv"
+        ),
+    )
+    open_meteo_parser.add_argument("--latitude", type=float, required=True)
+    open_meteo_parser.add_argument("--longitude", type=float, required=True)
+    open_meteo_parser.add_argument("--start-date", required=True, help="Inclusive ISO date (YYYY-MM-DD).")
+    open_meteo_parser.add_argument("--end-date", required=True, help="Inclusive ISO date (YYYY-MM-DD).")
+    open_meteo_parser.add_argument("--hourly", dest="hourly_variables", action="append", required=True, help="Hourly Open-Meteo variable. Repeat to request multiple variables.")
+    open_meteo_parser.add_argument(
+        "--api-kind",
+        choices=["auto", "forecast", "historical-forecast", "historical-weather"],
+        default="auto",
+        help="Open-Meteo backend family. 'auto' routes by requested date range.",
+    )
+    open_meteo_parser.add_argument("--timezone-name", default="GMT", help="Open-Meteo timezone parameter. Defaults to GMT for explicit UTC-aligned output.")
+    open_meteo_parser.add_argument("--model", dest="models", action="append", default=None, help="Optional Open-Meteo model selector. Repeat to pass multiple models.")
+    open_meteo_parser.add_argument("--temperature-unit", default=None)
+    open_meteo_parser.add_argument("--wind-speed-unit", default=None)
+    open_meteo_parser.add_argument("--precipitation-unit", default=None)
+    open_meteo_parser.add_argument("--cell-selection", default=None)
+    open_meteo_parser.add_argument("--elevation", type=float, default=None)
+    open_meteo_parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    open_meteo_parser.add_argument("--output-path", type=Path, default=None, help="Optional path to persist the normalized tabular dataset.")
+    open_meteo_parser.add_argument("--profile-output", type=Path, default=None, help="Optional path to persist the materialized profile table.")
+    _add_profile_table_materialization_arguments(open_meteo_parser)
+
+    urban_microclimate_parser = _add_command_parser(
+        subparsers,
+        "derive-urban-microclimate",
+        help_text="Derive boundary-layer, radiative, and human thermal metrics from a tabular weather dataset.",
+        description=(
+            "Run an explicit urban microclimate closure over a shared TabularDataset. "
+            "Column alignment stays explicit: either choose a named mapping profile such as "
+            "'open-meteo' or pass the required source column names directly."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  spectral-packet-engine derive-urban-microclimate artifacts/weather.csv --mapping-profile open-meteo "
+            "--output-path artifacts/weather_microclimate.csv\n"
+            "  spectral-packet-engine derive-urban-microclimate data.csv --air-temperature-column temp_c "
+            "--relative-humidity-column rh --wind-speed-column wind_m_s"
+        ),
+    )
+    urban_microclimate_parser.add_argument("dataset_path", type=Path)
+    urban_microclimate_parser.add_argument("--mapping-profile", choices=["open-meteo"], default=None)
+    urban_microclimate_parser.add_argument("--air-temperature-column", default=None)
+    urban_microclimate_parser.add_argument("--relative-humidity-column", default=None)
+    urban_microclimate_parser.add_argument("--wind-speed-column", default=None)
+    urban_microclimate_parser.add_argument("--pressure-column", default="surface_pressure")
+    urban_microclimate_parser.add_argument("--shortwave-radiation-column", default=None)
+    urban_microclimate_parser.add_argument("--longwave-radiation-column", default=None)
+    urban_microclimate_parser.add_argument("--measurement-height-m", type=float, default=10.0)
+    urban_microclimate_parser.add_argument("--zero-plane-displacement-m", type=float, default=0.0)
+    urban_microclimate_parser.add_argument("--roughness-length-m", type=float, default=0.8)
+    urban_microclimate_parser.add_argument("--thermal-roughness-length-m", type=float, default=0.1)
+    urban_microclimate_parser.add_argument("--min-wind-speed-m-s", type=float, default=0.1)
+    urban_microclimate_parser.add_argument("--reference-pressure-pa", type=float, default=101325.0)
+    urban_microclimate_parser.add_argument("--shortwave-absorptivity", type=float, default=0.7)
+    urban_microclimate_parser.add_argument("--longwave-emissivity", type=float, default=0.97)
+    urban_microclimate_parser.add_argument("--shortwave-projected-area-factor", type=float, default=0.7)
+    urban_microclimate_parser.add_argument("--sky-view-factor", type=float, default=1.0)
+    urban_microclimate_parser.add_argument("--skin-temperature-c", type=float, default=33.0)
+    urban_microclimate_parser.add_argument("--clothing-insulation-clo", type=float, default=0.7)
+    urban_microclimate_parser.add_argument("--metabolic-heat-flux-w-m2", type=float, default=80.0)
+    urban_microclimate_parser.add_argument("--output-path", type=Path, default=None, help="Optional path to persist the derived dataset.")
 
     analyze_table_parser = subparsers.add_parser(
         "analyze-profile-table",
@@ -429,6 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_table_parser.add_argument("--device", default="auto")
     analyze_table_parser.add_argument("--normalize", action="store_true")
     analyze_table_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(analyze_table_parser)
 
     compress_parser = subparsers.add_parser(
         "compress-profile-table",
@@ -440,6 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     compress_parser.add_argument("--device", default="auto")
     compress_parser.add_argument("--normalize", action="store_true", help="Normalize each profile before compression.")
     compress_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(compress_parser)
 
     sweep_parser = subparsers.add_parser("compression-sweep", help="Evaluate compression quality across multiple mode counts.")
     sweep_parser.add_argument("table_path", type=Path)
@@ -447,6 +597,7 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_parser.add_argument("--device", default="auto")
     sweep_parser.add_argument("--normalize", action="store_true")
     sweep_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(sweep_parser)
 
     fit_parser = subparsers.add_parser(
         "fit-profile-table",
@@ -464,6 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
     fit_parser.add_argument("--learning-rate", type=float, default=0.05)
     fit_parser.add_argument("--device", default="auto")
     fit_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(fit_parser)
 
     spectroscopy_parser = _add_command_parser(
         subparsers,
@@ -548,6 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("candidate_table_path", type=Path)
     compare_parser.add_argument("--device", default="auto")
     compare_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(compare_parser)
 
     db_inspect_parser = subparsers.add_parser(
         "inspect-database",
@@ -693,19 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sql_analyze_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_analyze_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
-    sql_analyze_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_analyze_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_analyze_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the spectral workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_analyze_parser)
     sql_analyze_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_analyze_parser.add_argument("--modes", type=int, default=32)
     sql_analyze_parser.add_argument("--device", default="auto")
@@ -728,19 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sql_compress_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_compress_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
-    sql_compress_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_compress_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_compress_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the spectral workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_compress_parser)
     sql_compress_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_compress_parser.add_argument("--modes", type=int, default=32)
     sql_compress_parser.add_argument("--device", default="auto")
@@ -763,19 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sql_export_features_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_export_features_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
-    sql_export_features_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_export_features_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_export_features_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the feature-export workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_export_features_parser)
     sql_export_features_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_export_features_parser.add_argument("--modes", type=int, default=32)
     sql_export_features_parser.add_argument("--device", default="auto")
@@ -806,19 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sql_profile_report_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_profile_report_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
-    sql_profile_report_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_profile_report_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_profile_report_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the spectral workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_profile_report_parser)
     sql_profile_report_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_profile_report_parser.add_argument("--analyze-modes", type=int, default=DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES)
     sql_profile_report_parser.add_argument("--compress-modes", type=int, default=DEFAULT_PROFILE_REPORT_COMPRESS_NUM_MODES)
@@ -842,19 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sql_fit_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_fit_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
-    sql_fit_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_fit_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_fit_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the spectral workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_fit_parser)
     sql_fit_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_fit_parser.add_argument("--center", type=float, default=0.36, help="Initial center guess.")
     sql_fit_parser.add_argument("--width", type=float, default=0.11, help="Initial width guess.")
@@ -916,8 +1009,8 @@ def build_parser() -> argparse.ArgumentParser:
     control_parser.add_argument("--phase", type=float, default=0.0)
     control_parser.add_argument(
         "--objective",
-        choices=["target_position", "target_interval_probability"],
-        default="target_position",
+        choices=list(ACCEPTED_CONTROL_OBJECTIVES),
+        default="position",
     )
     control_parser.add_argument("--target-value", type=float, required=True)
     control_parser.add_argument("--final-time", type=float, required=True)
@@ -965,6 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_inference_parser.add_argument("--device", default="auto")
     profile_inference_parser.add_argument("--normalize", action="store_true")
     profile_inference_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(profile_inference_parser)
 
     tf_parser = subparsers.add_parser(
         "tf-train-table",
@@ -978,6 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
     tf_parser.add_argument("--normalize", action="store_true")
     tf_parser.add_argument("--export-dir", type=Path, default=None)
     tf_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(tf_parser)
 
     tf_eval_parser = subparsers.add_parser(
         "tf-evaluate-table",
@@ -990,6 +1085,7 @@ def build_parser() -> argparse.ArgumentParser:
     tf_eval_parser.add_argument("--normalize", action="store_true")
     tf_eval_parser.add_argument("--export-dir", type=Path, default=None)
     tf_eval_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(tf_eval_parser)
 
     ml_train_parser = _add_command_parser(
         subparsers,
@@ -1016,6 +1112,7 @@ def build_parser() -> argparse.ArgumentParser:
     ml_train_parser.add_argument("--device", default="auto")
     ml_train_parser.add_argument("--export-dir", type=Path, default=None)
     ml_train_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(ml_train_parser)
 
     ml_eval_parser = _add_command_parser(
         subparsers,
@@ -1040,6 +1137,7 @@ def build_parser() -> argparse.ArgumentParser:
     ml_eval_parser.add_argument("--device", default="auto")
     ml_eval_parser.add_argument("--export-dir", type=Path, default=None)
     ml_eval_parser.add_argument("--output-dir", type=Path, default=None)
+    _add_profile_table_materialization_arguments(ml_eval_parser)
 
     tree_train_parser = _add_command_parser(
         subparsers,
@@ -1123,19 +1221,7 @@ def build_parser() -> argparse.ArgumentParser:
     sql_ml_train_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_ml_train_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
     sql_ml_train_parser.add_argument("--backend", choices=["auto", "torch", "jax", "tensorflow"], default="auto")
-    sql_ml_train_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_ml_train_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_ml_train_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the surrogate workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_ml_train_parser)
     sql_ml_train_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_ml_train_parser.add_argument("--modes", type=int, default=16)
     sql_ml_train_parser.add_argument("--epochs", type=int, default=20)
@@ -1163,19 +1249,7 @@ def build_parser() -> argparse.ArgumentParser:
     sql_ml_eval_parser.add_argument("database", help="SQLite file path or database URL.")
     sql_ml_eval_parser.add_argument("query", help="SQL statement that yields a profile-table-shaped result.")
     sql_ml_eval_parser.add_argument("--backend", choices=["auto", "torch", "jax", "tensorflow"], default="auto")
-    sql_ml_eval_parser.add_argument("--time-column", default="time", help="Column to use as the profile-table time axis.")
-    sql_ml_eval_parser.add_argument(
-        "--position-column",
-        action="append",
-        dest="position_columns",
-        default=None,
-        help="Explicit position column to include. Repeat to constrain a query result to a known modal grid.",
-    )
-    sql_ml_eval_parser.add_argument(
-        "--sort-by-time",
-        action="store_true",
-        help="Sort materialized query rows by the resolved time column before entering the surrogate workflow.",
-    )
+    _add_sql_profile_table_materialization_arguments(sql_ml_eval_parser)
     sql_ml_eval_parser.add_argument("--param", action="append", default=None, help="Bound query parameter in key=value form.")
     sql_ml_eval_parser.add_argument("--modes", type=int, default=16)
     sql_ml_eval_parser.add_argument("--epochs", type=int, default=20)
@@ -1297,6 +1371,35 @@ def build_parser() -> argparse.ArgumentParser:
     plan_mcp_tunnel_parser.add_argument("--remote-port", type=int, default=8765, help="Remote MCP service port.")
     plan_mcp_tunnel_parser.add_argument("--remote-host", default="127.0.0.1", help="Remote bind host seen from the SSH target.")
     plan_mcp_tunnel_parser.add_argument("--streamable-http-path", default="/mcp", help="Remote MCP HTTP path.")
+
+    _add_command_parser(
+        subparsers,
+        "plan-mcp-ingress",
+        help_text="Render a public-hosting plan that keeps MCP bind/origin/nginx settings aligned.",
+        description=(
+            "Build one shared deployment contract for public hostnames, allowed Host/Origin values, "
+            "the canonical public endpoint, and the nginx reverse-proxy snippet that should front the "
+            "private MCP listener."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  spectral-packet-engine plan-mcp-ingress --public-host lightcap.ai\n"
+            "  spectral-packet-engine plan-mcp-ingress --public-host lightcap.ai --public-host www.lightcap.ai "
+            "--upstream-port 8765 --root-redirect-path /mcp/server_info"
+        ),
+    )
+    plan_mcp_ingress_parser = subparsers.choices["plan-mcp-ingress"]
+    plan_mcp_ingress_parser.add_argument("--public-host", action="append", required=True, help="Public hostname served by the reverse proxy. Repeat as needed.")
+    plan_mcp_ingress_parser.add_argument("--public-scheme", choices=["http", "https"], default="https", help="External scheme clients use when reaching the MCP endpoint.")
+    plan_mcp_ingress_parser.add_argument("--public-port", type=int, default=None, help="External port if it differs from the scheme default.")
+    plan_mcp_ingress_parser.add_argument("--streamable-http-path", default="/mcp", help="Published MCP HTTP mount path.")
+    plan_mcp_ingress_parser.add_argument("--upstream-host", default="127.0.0.1", help="Private upstream host that nginx should proxy to.")
+    plan_mcp_ingress_parser.add_argument("--upstream-port", type=int, default=8765, help="Private upstream port that nginx should proxy to.")
+    plan_mcp_ingress_parser.add_argument(
+        "--root-redirect-path",
+        default="/mcp/server_info",
+        help="Optional site-root redirect target. Pass empty string to leave / unmanaged.",
+    )
 
     probe_mcp_parser = _add_command_parser(
         subparsers,
@@ -1512,12 +1615,12 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command in {"inspect-profile-table", "inspect-table"}:
-        _emit(summarize_profile_table(load_profile_table(args.table_path), device=args.device))
+        _emit(summarize_profile_table(_load_profile_table_from_cli_args(args.table_path, args), device=args.device))
         return 0
 
     if args.command == "profile-report":
-        report = load_profile_table_report(
-            args.table_path,
+        report = build_profile_table_report(
+            _load_profile_table_from_cli_args(args.table_path, args),
             analyze_num_modes=args.analyze_modes,
             compress_num_modes=args.compress_modes,
             device=args.device,
@@ -1534,7 +1637,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
     if args.command == "export-features":
         requested_includes = {"coefficients", "moments"} if not args.include else set(args.include)
         summary = export_feature_table_from_profile_table(
-            args.table_path,
+            _load_profile_table_from_cli_args(args.table_path, args),
             num_modes=args.modes,
             device=args.device,
             normalize_each_profile=args.normalize,
@@ -1556,9 +1659,98 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         _emit(load_tabular_dataset_from_path(args.dataset_path))
         return 0
 
+    if args.command == "ingest-open-meteo":
+        result = ingest_open_meteo_hourly_dataset(
+            latitude=args.latitude,
+            longitude=args.longitude,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            hourly_variables=args.hourly_variables,
+            api_kind=args.api_kind,
+            timezone_name=args.timezone_name,
+            models=args.models,
+            temperature_unit=args.temperature_unit,
+            wind_speed_unit=args.wind_speed_unit,
+            precipitation_unit=args.precipitation_unit,
+            cell_selection=args.cell_selection,
+            elevation=args.elevation,
+            timeout_seconds=args.timeout_seconds,
+            **_profile_table_load_kwargs(args),
+        )
+        if args.profile_output is not None and result.profile_table is None:
+            raise ValueError("--profile-output requires explicit profile-table materialization arguments")
+        output_path = None
+        profile_output = None
+        if args.output_path is not None:
+            output_path = str(save_tabular_dataset(result.dataset, args.output_path))
+        if args.profile_output is not None:
+            profile_output = str(save_profile_table(result.profile_table, args.profile_output))
+        _emit(
+            {
+                "api_kind": result.api_kind,
+                "request_url": result.request_url,
+                "latitude": result.latitude,
+                "longitude": result.longitude,
+                "elevation": result.elevation,
+                "timezone": result.timezone,
+                "utc_offset_seconds": result.utc_offset_seconds,
+                "hourly_variables": result.hourly_variables,
+                "hourly_units": result.hourly_units,
+                "dataset": result.dataset_summary,
+                "profile_materialization": result.profile_materialization,
+                "profile_table": result.profile_summary,
+                "output_path": output_path,
+                "profile_output": profile_output,
+            }
+        )
+        return 0
+
+    if args.command == "derive-urban-microclimate":
+        result = derive_urban_microclimate_from_tabular_dataset(
+            args.dataset_path,
+            mapping_profile=args.mapping_profile,
+            air_temperature_column=args.air_temperature_column,
+            relative_humidity_column=args.relative_humidity_column,
+            wind_speed_column=args.wind_speed_column,
+            pressure_column=args.pressure_column,
+            shortwave_radiation_column=args.shortwave_radiation_column,
+            longwave_radiation_column=args.longwave_radiation_column,
+            boundary_layer=UrbanBoundaryLayerConfig(
+                measurement_height_m=args.measurement_height_m,
+                zero_plane_displacement_m=args.zero_plane_displacement_m,
+                roughness_length_m=args.roughness_length_m,
+                thermal_roughness_length_m=args.thermal_roughness_length_m,
+                min_wind_speed_m_s=args.min_wind_speed_m_s,
+                reference_pressure_pa=args.reference_pressure_pa,
+            ),
+            radiative_transfer=UrbanRadiativeTransferConfig(
+                shortwave_absorptivity=args.shortwave_absorptivity,
+                longwave_emissivity=args.longwave_emissivity,
+                shortwave_projected_area_factor=args.shortwave_projected_area_factor,
+                sky_view_factor=args.sky_view_factor,
+            ),
+            human_thermal_response=HumanThermalResponseConfig(
+                skin_temperature_c=args.skin_temperature_c,
+                clothing_insulation_clo=args.clothing_insulation_clo,
+                metabolic_heat_flux_w_m2=args.metabolic_heat_flux_w_m2,
+            ),
+        )
+        output_path = None if args.output_path is None else str(save_tabular_dataset(result.dataset, args.output_path))
+        _emit(
+            {
+                "summary": result.summary,
+                "mapping": result.mapping,
+                "boundary_layer": result.boundary_layer,
+                "radiative_transfer": result.radiative_transfer,
+                "human_thermal_response": result.human_thermal_response,
+                "output_path": output_path,
+            }
+        )
+        return 0
+
     if args.command in {"analyze-profile-table", "analyze-table"}:
         summary = analyze_profile_table_spectra(
-            load_profile_table(args.table_path),
+            _load_profile_table_from_cli_args(args.table_path, args),
             num_modes=args.modes,
             device=args.device,
             normalize_each_profile=args.normalize,
@@ -1569,7 +1761,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command in {"compress-profile-table", "compress-table", "compress-csv"}:
-        table = load_profile_table(args.table_path)
+        table = _load_profile_table_from_cli_args(args.table_path, args)
         summary = compress_profile_table(
             table,
             num_modes=args.modes,
@@ -1583,7 +1775,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
 
     if args.command == "compression-sweep":
         summary = sweep_profile_table_compression(
-            load_profile_table(args.table_path),
+            _load_profile_table_from_cli_args(args.table_path, args),
             mode_counts=args.mode_counts,
             device=args.device,
             normalize_each_profile=args.normalize,
@@ -1594,7 +1786,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command in {"fit-profile-table", "fit-table", "fit-csv"}:
-        table = load_profile_table(args.table_path)
+        table = _load_profile_table_from_cli_args(args.table_path, args)
         summary = fit_gaussian_packet_to_profile_table(
             table,
             initial_guess={
@@ -1692,8 +1884,8 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
 
     if args.command in {"compare-profile-tables", "compare-tables"}:
         summary = compare_profile_tables(
-            load_profile_table(args.reference_table_path),
-            load_profile_table(args.candidate_table_path),
+            _load_profile_table_from_cli_args(args.reference_table_path, args),
+            _load_profile_table_from_cli_args(args.candidate_table_path, args),
             device=args.device,
         )
         if args.output_dir is not None:
@@ -1787,9 +1979,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
             args.database,
             args.query,
             parameters=parameters,
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             num_modes=args.modes,
             device=args.device,
             normalize_each_profile=args.normalize,
@@ -1803,9 +1993,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
         _emit(summary)
@@ -1817,9 +2005,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
             args.database,
             args.query,
             parameters=parameters,
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             num_modes=args.modes,
             device=args.device,
             normalize_each_profile=args.normalize,
@@ -1833,9 +2019,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
         _emit(summary)
@@ -1848,9 +2032,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
             args.database,
             args.query,
             parameters=parameters,
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             num_modes=args.modes,
             device=args.device,
             normalize_each_profile=args.normalize,
@@ -1867,9 +2049,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
             summary = replace(summary, output_path=str(args.output_dir / f"features.{args.format}"))
@@ -1882,9 +2062,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
             args.database,
             args.query,
             parameters=parameters,
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             analyze_num_modes=args.analyze_modes,
             compress_num_modes=args.compress_modes,
             device=args.device,
@@ -1898,9 +2076,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
         _emit(report)
@@ -1918,9 +2094,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                 "wavenumber": args.wavenumber,
                 "phase": args.phase,
             },
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             num_modes=args.modes,
             quadrature_points=args.quadrature,
             device=args.device,
@@ -1936,9 +2110,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
         _emit(summary)
@@ -2058,7 +2230,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
 
     if args.command == "profile-inference-workflow":
         summary = run_profile_inference_workflow(
-            args.table_path,
+            _load_profile_table_from_cli_args(args.table_path, args),
             initial_guess={
                 "center": args.center,
                 "width": args.width,
@@ -2079,7 +2251,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command in {"tf-train-table", "tf-train-csv"}:
-        table = load_profile_table(args.table_path)
+        table = _load_profile_table_from_cli_args(args.table_path, args)
         summary = train_tensorflow_surrogate_on_profile_table(
             table,
             num_modes=args.modes,
@@ -2096,7 +2268,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command == "tf-evaluate-table":
-        table = load_profile_table(args.table_path)
+        table = _load_profile_table_from_cli_args(args.table_path, args)
         summary = evaluate_tensorflow_surrogate_on_profile_table(
             table,
             num_modes=args.modes,
@@ -2113,7 +2285,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command == "ml-train-table":
-        table = load_profile_table(args.table_path)
+        table = _load_profile_table_from_cli_args(args.table_path, args)
         summary = train_modal_surrogate_on_profile_table(
             table,
             backend=args.backend,
@@ -2132,7 +2304,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
         return 0
 
     if args.command == "ml-evaluate-table":
-        table = load_profile_table(args.table_path)
+        table = _load_profile_table_from_cli_args(args.table_path, args)
         summary = evaluate_modal_surrogate_on_profile_table(
             table,
             backend=args.backend,
@@ -2203,9 +2375,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
             args.query,
             backend=args.backend,
             parameters=parameters,
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             num_modes=args.modes,
             normalize_each_profile=args.normalize,
             config=ModalSurrogateConfig(
@@ -2224,9 +2394,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
         _emit(summary)
@@ -2239,9 +2407,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
             args.query,
             backend=args.backend,
             parameters=parameters,
-            time_column=args.time_column,
-            position_columns=args.position_columns,
-            sort_by_time=args.sort_by_time,
+            **_profile_table_load_kwargs(args),
             num_modes=args.modes,
             normalize_each_profile=args.normalize,
             config=ModalSurrogateConfig(
@@ -2260,9 +2426,7 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                     args.database,
                     args.query,
                     parameters=parameters,
-                    time_column=args.time_column,
-                    position_columns=args.position_columns,
-                    sort_by_time=args.sort_by_time,
+                    **_profile_table_load_kwargs(args),
                 ),
             )
         _emit(summary)
@@ -2371,6 +2535,22 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                 remote_port=args.remote_port,
                 remote_host=args.remote_host,
                 streamable_http_path=args.streamable_http_path,
+            ).to_dict()
+        )
+        return 0
+
+    if args.command == "plan-mcp-ingress":
+        from spectral_packet_engine.mcp_deployment import build_mcp_public_ingress_plan
+
+        _emit(
+            build_mcp_public_ingress_plan(
+                public_hosts=tuple(args.public_host),
+                public_scheme=args.public_scheme,
+                public_port=args.public_port,
+                streamable_http_path=args.streamable_http_path,
+                upstream_host=args.upstream_host,
+                upstream_port=args.upstream_port,
+                root_redirect_path=None if args.root_redirect_path == "" else args.root_redirect_path,
             ).to_dict()
         )
         return 0

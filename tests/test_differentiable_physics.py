@@ -77,7 +77,7 @@ def test_optimize_packet_control_reports_gradient_and_improves_loss() -> None:
             "wavenumber": 18.0,
             "phase": 0.0,
         },
-        objective="target_position",
+        objective="position",
         target_value=0.55,
         final_time=0.004,
         num_modes=48,
@@ -90,4 +90,54 @@ def test_optimize_packet_control_reports_gradient_and_improves_loss() -> None:
     assert summary.history[0] >= summary.history[-1]
     assert tuple(summary.gradient_summary.gradient.shape) == (4,)
     assert tuple(summary.final_density.shape) == (64,)
+    assert torch.isclose(summary.density_matrix.normalized_purity, torch.tensor(1.0, dtype=torch.float64), atol=1e-10).item()
+    assert summary.density_matrix.normalized_is_pure.item() is True
+    assert summary.phase_space.W.shape == (64, 64)
+    assert torch.isclose(summary.phase_space.total_integral, summary.density_matrix.trace, atol=5e-2, rtol=5e-2).item()
     assert 0.0 <= summary.final_expectation_position <= 1.0
+
+
+def test_optimize_packet_control_accepts_interval_probability_objective() -> None:
+    summary = optimize_packet_control(
+        initial_guess={
+            "center": 0.25,
+            "width": 0.08,
+            "wavenumber": 18.0,
+            "phase": 0.0,
+        },
+        objective="interval_probability",
+        target_value=0.35,
+        final_time=0.004,
+        interval=(0.5, 1.0),
+        num_modes=48,
+        quadrature_points=1024,
+        grid_points=64,
+        optimization_config=GradientOptimizationConfig(steps=40, learning_rate=0.03),
+        device="cpu",
+    )
+
+    assert summary.objective == "interval_probability"
+    assert summary.final_interval_probability is not None
+    assert 0.0 <= summary.final_interval_probability <= 1.0
+
+
+def test_optimize_packet_control_preserves_legacy_target_aliases() -> None:
+    summary = optimize_packet_control(
+        initial_guess={
+            "center": 0.25,
+            "width": 0.08,
+            "wavenumber": 18.0,
+            "phase": 0.0,
+        },
+        objective="target_interval_probability",
+        target_value=0.35,
+        final_time=0.004,
+        interval=(0.5, 1.0),
+        num_modes=48,
+        quadrature_points=1024,
+        grid_points=64,
+        optimization_config=GradientOptimizationConfig(steps=10, learning_rate=0.03),
+        device="cpu",
+    )
+
+    assert summary.objective == "interval_probability"

@@ -122,3 +122,37 @@ def test_profile_table_materialization_config_selects_columns_and_sorts_times() 
         ],
     )
     assert table.source == "materialized"
+
+
+def test_load_profile_table_accepts_semantic_position_columns_with_explicit_coordinates(tmp_path) -> None:
+    path = tmp_path / "semantic_profiles.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "sample,h02,h00,h01",
+                "0.2,0.4,0.1,0.3",
+                "0.0,0.45,0.15,0.35",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    table = load_profile_table(
+        path,
+        time_column="sample",
+        position_columns=["h02", "h00", "h01"],
+        position_values=[1.0, 0.0, 0.5],
+        sort_by_time=True,
+    )
+
+    np.testing.assert_allclose(table.sample_times, [0.0, 0.2])
+    np.testing.assert_allclose(table.position_grid, [0.0, 0.5, 1.0])
+    np.testing.assert_allclose(
+        table.profiles,
+        [
+            [0.15, 0.35, 0.45],
+            [0.1, 0.3, 0.4],
+        ],
+    )
+    assert table.source == str(path)

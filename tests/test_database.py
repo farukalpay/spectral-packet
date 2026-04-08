@@ -207,6 +207,41 @@ def test_database_profile_query_materialization_and_compression_are_explicit(tmp
     assert metadata["input"]["profile_table"]["sort_by_time"] is True
 
 
+def test_database_profile_query_materialization_accepts_semantic_position_coordinates(tmp_path) -> None:
+    database_path = tmp_path / "semantic.sqlite"
+    dataset = TabularDataset.from_rows(
+        [
+            {"sample": 0.2, "h02": 0.4, "h00": 0.1, "h01": 0.3},
+            {"sample": 0.0, "h02": 0.45, "h00": 0.15, "h01": 0.35},
+        ]
+    )
+    write_tabular_dataset_to_database(database_path, "profiles", dataset, if_exists="replace")
+    query = 'SELECT sample, h02, h00, h01 FROM "profiles"'
+
+    materialized = materialize_profile_table_from_database_query(
+        database_path,
+        query,
+        time_column="sample",
+        position_columns=["h02", "h00", "h01"],
+        position_values=[1.0, 0.0, 0.5],
+        sort_by_time=True,
+    )
+    metadata = database_profile_query_artifact_metadata(
+        database_path,
+        query,
+        time_column="sample",
+        position_columns=["h02", "h00", "h01"],
+        position_values=[1.0, 0.0, 0.5],
+        sort_by_time=True,
+    )
+
+    assert materialized.materialization.position_values == (1.0, 0.0, 0.5)
+    assert materialized.layout.position_columns == ("h00", "h01", "h02")
+    assert materialized.table.sample_times.tolist() == [0.0, 0.2]
+    assert materialized.table.position_grid.tolist() == [0.0, 0.5, 1.0]
+    assert metadata["input"]["profile_table"]["position_values"] == (1.0, 0.0, 0.5)
+
+
 def test_create_table_from_query_avoids_preflight_table_probes(tmp_path, monkeypatch) -> None:
     database_path = tmp_path / "profiles.sqlite"
     write_tabular_dataset_to_database(database_path, "profiles", _profile_dataset(), if_exists="replace")
