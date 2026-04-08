@@ -10,14 +10,19 @@ from spectral_packet_engine import (
     analyze_profile_table_spectra,
     build_profile_table_report,
     build_profile_table_report_from_database_query,
+    compare_state_trajectories,
     compare_profile_tables,
     export_feature_table_from_database_query,
     export_feature_table_from_profile_table,
     load_tabular_dataset,
+    make_box_mode_spectral_state,
     make_plane_wave_packet,
+    make_windowed_plane_wave_packet,
     parquet_support_is_available,
     ProfileTable,
     project_packet_state,
+    project_spectral_state,
+    project_wavefunction_state,
     TabularDataset,
     compress_profile_table,
     evaluate_tensorflow_surrogate_on_profile_table,
@@ -25,6 +30,7 @@ from spectral_packet_engine import (
     save_tabular_dataset,
     simulate_gaussian_packet,
     simulate_packet_state,
+    simulate_spectral_state,
     simulate_packet_sweep,
     summarize_profile_table,
     train_tree_model,
@@ -151,6 +157,85 @@ def test_generic_packet_workflows_support_plane_wave_family() -> None:
     assert torch.allclose(forward.total_probability, torch.ones_like(forward.total_probability), atol=5e-3, rtol=5e-3)
     assert forward.phase_space.W.shape == (3, 64, 64)
     assert torch.allclose(forward.phase_space.total_integral, forward.total_probability, atol=5e-2, rtol=5e-2)
+
+
+def test_windowed_plane_wave_and_spectral_state_workflows_are_first_class() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_windowed_plane_wave_packet(
+        domain,
+        center=0.35,
+        window_width=0.24,
+        wavenumber=20.0,
+    )
+    mode_state = make_box_mode_spectral_state(domain, mode_index=8, num_modes=64)
+
+    projection = project_spectral_state(mode_state, num_modes=64, device="cpu")
+    forward_packet = simulate_packet_state(
+        packet,
+        times=[0.0, 1e-3],
+        interval=[0.55, 0.9],
+        num_modes=64,
+        quadrature_points=1024,
+        grid_points=128,
+        device="cpu",
+    )
+    forward_mode = simulate_spectral_state(
+        mode_state,
+        times=[0.0, 1e-3],
+        interval=[0.55, 0.9],
+        num_modes=64,
+        grid_points=128,
+        device="cpu",
+    )
+
+    assert float(projection.reconstruction_error) == pytest.approx(0.0)
+    assert projection.initial_support is None
+    assert forward_packet.initial_support is not None
+    assert forward_packet.tracked_interval_probability is not None
+    assert forward_packet.tracked_interval_probability.shape == forward_packet.times.shape
+    assert forward_mode.initial_support is None
+    assert forward_mode.tracked_interval_probability is not None
+    assert forward_mode.phase_space.W.shape == (2, 64, 64)
+    assert torch.allclose(forward_mode.total_probability, torch.ones_like(forward_mode.total_probability), atol=5e-3, rtol=5e-3)
+    assert float(packet.support_diagnostics().outside_probability_mass[0]) == pytest.approx(0.0)
+
+
+def test_project_wavefunction_state_and_compare_state_trajectories() -> None:
+    domain = InfiniteWell1D.from_length(1.0)
+    packet = make_windowed_plane_wave_packet(
+        domain,
+        center=0.35,
+        window_width=0.22,
+        wavenumber=18.0,
+    )
+    mode_state = make_box_mode_spectral_state(domain, mode_index=6, num_modes=64)
+    grid = domain.grid(256)
+    sampled = packet.wavefunction(grid)
+
+    projected = project_wavefunction_state(
+        sampled,
+        grid,
+        num_modes=64,
+        quadrature_points=1024,
+        device="cpu",
+    )
+    comparison = compare_state_trajectories(
+        [("windowed", packet), ("mode", mode_state)],
+        times=[0.0, 1e-3],
+        interval=[0.6, 0.95],
+        num_modes=64,
+        quadrature_points=1024,
+        grid_points=128,
+        device="cpu",
+    )
+
+    assert projected.initial_support is None
+    assert float(projected.reconstruction_error) < 5e-3
+    assert len(comparison.states) == 2
+    assert len(comparison.pairs) == 1
+    assert comparison.interval == pytest.approx((0.6, 0.95))
+    assert comparison.states[0].forward.tracked_interval_probability is not None
+    assert comparison.pairs[0].comparison.fidelity < 0.999
 
 
 def test_profile_table_summary_and_compression_sweep() -> None:

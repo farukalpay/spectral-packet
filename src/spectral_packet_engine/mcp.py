@@ -5,6 +5,7 @@ import collections
 import hashlib
 import importlib.util
 import json
+import math
 import sys
 import time as _time
 from dataclasses import dataclass, replace
@@ -88,6 +89,7 @@ from spectral_packet_engine.workflows import (
     build_profile_table_report_from_database_query,
     bootstrap_local_database,
     compare_profile_tables,
+    compare_state_trajectories,
     compress_profile_table,
     compress_profile_table_from_database_query,
     database_profile_query_workflow_artifact_metadata,
@@ -114,13 +116,18 @@ from spectral_packet_engine.workflows import (
     materialize_database_query,
     materialize_database_query_to_table,
     optimize_packet_control,
-    simulate_packet_sweep,
     project_gaussian_packet,
+    project_packet_state,
+    project_spectral_state,
+    project_wavefunction_state,
     run_control_workflow,
     run_profile_inference_workflow,
     run_spectroscopy_workflow,
     run_transport_resonance_workflow,
     simulate_gaussian_packet,
+    simulate_packet_state,
+    simulate_spectral_state,
+    simulate_packet_sweep,
     solve_radial_reduction,
     summarize_database_query_result,
     summarize_profile_table,
@@ -156,6 +163,204 @@ def mcp_is_available() -> bool:
 
 def _coerce_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
     return {} if parameters is None else {str(key): value for key, value in parameters.items()}
+
+
+_STATE_FAMILY_ALIASES = {
+    "gaussian": "gaussian",
+    "plane_wave": "plane_wave",
+    "plane-wave": "plane_wave",
+    "windowed_plane_wave": "windowed_plane_wave",
+    "windowed-plane-wave": "windowed_plane_wave",
+    "box_mode": "box_mode",
+    "mode": "box_mode",
+    "spectral": "spectral_coefficients",
+    "spectral_coefficients": "spectral_coefficients",
+    "spectral-coefficients": "spectral_coefficients",
+    "wavefunction": "sampled_wavefunction",
+    "sampled_wavefunction": "sampled_wavefunction",
+    "sampled-wavefunction": "sampled_wavefunction",
+}
+
+
+def _normalized_state_family(spec: dict[str, Any]) -> str:
+    raw_family = str(spec.get("family", spec.get("kind", "gaussian"))).strip().lower()
+    family = _STATE_FAMILY_ALIASES.get(raw_family)
+    if family is None:
+        supported = ", ".join(sorted(set(_STATE_FAMILY_ALIASES.values())))
+        raise ValueError(f"unsupported state family: {raw_family}. Supported families: {supported}")
+    return family
+
+
+def _coerce_complex_vector(
+    real_values: Any,
+    imag_values: Any,
+    *,
+    field_name: str,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if real_values is None:
+        raise ValueError(f"{field_name}_real must be provided")
+    real_tensor = torch.as_tensor(real_values, dtype=dtype, device=device).reshape(-1)
+    if imag_values is None:
+        imag_tensor = torch.zeros_like(real_tensor)
+    else:
+        imag_tensor = torch.as_tensor(imag_values, dtype=dtype, device=device).reshape(-1)
+    if real_tensor.shape != imag_tensor.shape:
+        raise ValueError(f"{field_name}_real and {field_name}_imag must have matching shapes")
+    return real_tensor.to(dtype=torch.complex128 if dtype == torch.float64 else torch.complex64) + 1j * imag_tensor.to(
+        dtype=torch.complex128 if dtype == torch.float64 else torch.complex64
+    )
+
+
+def _state_domain_from_spec(spec: dict[str, Any], *, device: str | torch.device | None) -> tuple[Any, Any, torch.Tensor | None]:
+    from spectral_packet_engine.domain import InfiniteWell1D
+    from spectral_packet_engine.runtime import inspect_torch_runtime
+
+    runtime = inspect_torch_runtime(device)
+    grid_values = spec.get("grid")
+    grid_tensor = None
+    if grid_values is not None:
+        grid_tensor = torch.as_tensor(grid_values, dtype=runtime.preferred_real_dtype, device=runtime.device).reshape(-1)
+        if grid_tensor.ndim != 1 or grid_tensor.shape[0] < 2:
+            raise ValueError("grid must contain at least two sample points")
+    left = float(spec.get("left", grid_tensor[0].item() if grid_tensor is not None else 0.0))
+    if "domain_length" in spec:
+        domain_length = float(spec["domain_length"])
+    elif grid_tensor is not None:
+        domain_length = float((grid_tensor[-1] - grid_tensor[0]).item())
+    else:
+        domain_length = 1.0
+    mass = float(spec.get("mass", 1.0))
+    hbar = float(spec.get("hbar", 1.0))
+    domain = InfiniteWell1D.from_length(
+        domain_length,
+        left=left,
+        mass=mass,
+        hbar=hbar,
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    return runtime, domain, grid_tensor
+
+
+def _coerce_tool_state_spec(
+    spec: dict[str, Any] | None,
+    *,
+    num_modes: int,
+    quadrature_points: int,
+    device: str | torch.device | None,
+    fallback_gaussian: dict[str, Any] | None = None,
+):
+    from spectral_packet_engine.basis import InfiniteWellBasis
+    from spectral_packet_engine.projector import ProjectionConfig, StateProjector
+    from spectral_packet_engine.state import (
+        SpectralState,
+        make_box_mode_spectral_state,
+        make_plane_wave_packet,
+        make_truncated_gaussian_packet,
+        make_windowed_plane_wave_packet,
+    )
+
+    state_spec = {} if spec is None else _coerce_parameters(spec)
+    if spec is None and fallback_gaussian is not None:
+        state_spec = {"family": "gaussian", **fallback_gaussian}
+    if not isinstance(state_spec, dict):
+        raise ValueError("state must be a JSON object when provided")
+
+    family = _normalized_state_family(state_spec)
+    runtime, domain, grid_tensor = _state_domain_from_spec(state_spec, device=device)
+
+    if family == "gaussian":
+        return family, make_truncated_gaussian_packet(
+            domain,
+            center=float(state_spec["center"]),
+            width=float(state_spec["width"]),
+            wavenumber=float(state_spec["wavenumber"]),
+            phase=float(state_spec.get("phase", 0.0)),
+        )
+    if family == "plane_wave":
+        return family, make_plane_wave_packet(
+            domain,
+            wavenumber=float(state_spec["wavenumber"]),
+            phase=float(state_spec.get("phase", 0.0)),
+        )
+    if family == "windowed_plane_wave":
+        return family, make_windowed_plane_wave_packet(
+            domain,
+            center=float(state_spec["center"]),
+            window_width=float(state_spec["window_width"]),
+            wavenumber=float(state_spec["wavenumber"]),
+            phase=float(state_spec.get("phase", 0.0)),
+        )
+    if family == "box_mode":
+        phase = float(state_spec.get("phase", 0.0))
+        return family, make_box_mode_spectral_state(
+            domain,
+            mode_index=int(state_spec["mode_index"]),
+            num_modes=num_modes,
+            weight=complex(math.cos(phase), math.sin(phase)),
+        )
+    if family == "spectral_coefficients":
+        coefficients = _coerce_complex_vector(
+            state_spec.get("coefficients_real"),
+            state_spec.get("coefficients_imag"),
+            field_name="coefficients",
+            dtype=runtime.preferred_real_dtype,
+            device=runtime.device,
+        )
+        return family, SpectralState(domain=domain, coefficients=coefficients)
+    if family == "sampled_wavefunction":
+        if grid_tensor is None:
+            raise ValueError("sampled_wavefunction state requires a grid")
+        wavefunction = _coerce_complex_vector(
+            state_spec.get("wavefunction_real", state_spec.get("values_real")),
+            state_spec.get("wavefunction_imag", state_spec.get("values_imag")),
+            field_name="wavefunction",
+            dtype=runtime.preferred_real_dtype,
+            device=runtime.device,
+        )
+        if wavefunction.shape[0] != grid_tensor.shape[0]:
+            raise ValueError("wavefunction samples must align with the provided grid")
+        projector = StateProjector(
+            InfiniteWellBasis(domain, num_modes),
+            ProjectionConfig(quadrature_points=quadrature_points),
+        )
+        return family, projector.project_wavefunction(wavefunction, grid_tensor)
+    raise AssertionError(f"unhandled state family: {family}")
+
+
+def _tool_state_label(spec: dict[str, Any], index: int) -> str:
+    label = str(spec.get("label", "")).strip()
+    return label or f"state_{index + 1}"
+
+
+def _project_sampled_wavefunction_from_spec(
+    spec: dict[str, Any],
+    *,
+    num_modes: int,
+    quadrature_points: int,
+    device: str | torch.device | None,
+):
+    runtime, _, grid_tensor = _state_domain_from_spec(spec, device=device)
+    if grid_tensor is None:
+        raise ValueError("sampled_wavefunction state requires a grid")
+    wavefunction = _coerce_complex_vector(
+        spec.get("wavefunction_real", spec.get("values_real")),
+        spec.get("wavefunction_imag", spec.get("values_imag")),
+        field_name="wavefunction",
+        dtype=runtime.preferred_real_dtype,
+        device=runtime.device,
+    )
+    if wavefunction.shape[0] != grid_tensor.shape[0]:
+        raise ValueError("wavefunction samples must align with the provided grid")
+    return project_wavefunction_state(
+        wavefunction,
+        grid_tensor,
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        device=device,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1021,47 +1226,80 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "After loading, use query_database to verify your data, then proceed with analysis tools."
         )
 
-    @_tool(server, runtime, "simulate_packet", "Simulate a Gaussian wavepacket in the infinite-well basis: project onto modes, propagate in time, and return grid-space snapshots with energy conservation diagnostics.", bounded=True)
+    @_tool(server, runtime, "simulate_packet", "Simulate a bounded-domain state specification in the infinite-well basis. Supports Gaussian, plane-wave, windowed plane-wave, box-mode, spectral-coefficient, and sampled-wavefunction inputs; returns grid-space snapshots, interval traces, density-matrix diagnostics, and phase-space diagnostics.", bounded=True)
     def simulate_packet_tool(
         center: float = 0.30,
         width: float = 0.07,
         wavenumber: float = 25.0,
         phase: float = 0.0,
+        state: dict[str, Any] | None = None,
         times: list[float] | None = None,
+        interval: list[float] | None = None,
         num_modes: int = 128,
         quadrature_points: int = 4096,
         grid_points: int = 512,
         device: str = "auto",
         output_dir: str | None = None,
     ) -> dict[str, Any]:
-        summary = simulate_gaussian_packet(
-            center=center,
-            width=width,
-            wavenumber=wavenumber,
-            phase=phase,
-            times=times or [0.0, 1e-3, 5e-3],
-            num_modes=num_modes,
-            quadrature_points=quadrature_points,
-            grid_points=grid_points,
-            device=device,
-        )
+        evaluation_times = times or [0.0, 1e-3, 5e-3]
+        if state is None:
+            summary = simulate_gaussian_packet(
+                center=center,
+                width=width,
+                wavenumber=wavenumber,
+                phase=phase,
+                times=evaluation_times,
+                interval=interval,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                grid_points=grid_points,
+                device=device,
+            )
+        else:
+            family, prepared_state = _coerce_tool_state_spec(
+                state,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                device=device,
+            )
+            if family in {"gaussian", "plane_wave", "windowed_plane_wave"}:
+                summary = simulate_packet_state(
+                    prepared_state,
+                    times=evaluation_times,
+                    interval=interval,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    grid_points=grid_points,
+                    device=device,
+                )
+            else:
+                summary = simulate_spectral_state(
+                    prepared_state,
+                    times=evaluation_times,
+                    interval=interval,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    grid_points=grid_points,
+                    device=device,
+                )
         if output_dir is not None:
             write_forward_artifacts(output_dir, summary)
         return to_serializable(summary)
 
-    @_tool(server, runtime, "project_packet", "Project a Gaussian wavepacket onto the infinite-well sine basis and return modal coefficients, projection quality, and grid-space reconstruction.", bounded=True)
+    @_tool(server, runtime, "project_packet", "Project a bounded-domain state specification onto the infinite-well sine basis and return modal coefficients, projection quality, density-matrix diagnostics, and phase-space diagnostics. Supports Gaussian, plane-wave, windowed plane-wave, box-mode, spectral-coefficient, and sampled-wavefunction inputs.", bounded=True)
     def project_packet_tool(
         center: float = 0.30,
         width: float = 0.07,
         wavenumber: float = 25.0,
         phase: float = 0.0,
+        state: dict[str, Any] | None = None,
         num_modes: int = 128,
         quadrature_points: int = 4096,
         grid_points: int = 2048,
         device: str = "auto",
     ) -> dict[str, Any]:
-        return to_serializable(
-            project_gaussian_packet(
+        if state is None:
+            summary = project_gaussian_packet(
                 center=center,
                 width=width,
                 wavenumber=wavenumber,
@@ -1071,7 +1309,77 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 grid_points=grid_points,
                 device=device,
             )
+        else:
+            family, prepared_state = _coerce_tool_state_spec(
+                state,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                device=device,
+            )
+            if family in {"gaussian", "plane_wave", "windowed_plane_wave"}:
+                summary = project_packet_state(
+                    prepared_state,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    grid_points=grid_points,
+                    device=device,
+                )
+            elif family == "sampled_wavefunction":
+                summary = _project_sampled_wavefunction_from_spec(
+                    _coerce_parameters(state),
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    device=device,
+                )
+            else:
+                summary = project_spectral_state(
+                    prepared_state,
+                    num_modes=num_modes,
+                    quadrature_points=quadrature_points,
+                    device=device,
+                )
+        return to_serializable(summary)
+
+    @_tool(
+        server,
+        runtime,
+        "compare_box_states",
+        "Compare multiple bounded-domain state specifications in one call. Supports Gaussian, plane-wave, windowed plane-wave, box-mode, spectral-coefficient, and sampled-wavefunction inputs; returns per-state forward diagnostics plus pairwise fidelity, trace distance, momentum, and uncertainty comparisons.",
+        bounded=True,
+    )
+    def compare_box_states_tool(
+        states: list[dict[str, Any]],
+        times: list[float] | None = None,
+        interval: list[float] | None = None,
+        num_modes: int = 128,
+        quadrature_points: int = 4096,
+        grid_points: int = 512,
+        device: str = "auto",
+    ) -> dict[str, Any]:
+        if len(states) < 2:
+            raise ValueError("compare_box_states requires at least two state specifications")
+        prepared_states: list[tuple[str, Any]] = []
+        for index, raw_spec in enumerate(states):
+            if not isinstance(raw_spec, dict):
+                raise ValueError("each state specification must be a JSON object")
+            label = _tool_state_label(raw_spec, index)
+            _, prepared_state = _coerce_tool_state_spec(
+                raw_spec,
+                num_modes=num_modes,
+                quadrature_points=quadrature_points,
+                device=device,
+            )
+            prepared_states.append((label, prepared_state))
+        summary = compare_state_trajectories(
+            prepared_states,
+            times=times or [0.0, 1e-3, 5e-3],
+            interval=interval,
+            num_modes=num_modes,
+            quadrature_points=quadrature_points,
+            grid_points=grid_points,
+            device=device,
         )
+        return to_serializable(summary)
 
     @_tool(server, runtime, "inspect_profile_table", "Load a profile table file FROM THE SERVER and report its grid dimensions, time slices, value ranges, and readiness for modal decomposition. If your data is local, use write_scratch_file first to upload it.")
     def inspect_profile_table_tool(table_path: str, device: str = "auto") -> dict[str, Any]:

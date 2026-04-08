@@ -82,6 +82,12 @@ from spectral_packet_engine.parametric_potentials import (
     describe_potential_families,
     families_for_workflow,
 )
+from spectral_packet_engine.pipelines import (
+    QuantumStateReport,
+    StateComparisonReport,
+    analyze_quantum_state,
+    compare_quantum_states,
+)
 from spectral_packet_engine.product import (
     DEFAULT_PROFILE_REPORT_ANALYZE_NUM_MODES,
     DEFAULT_PROFILE_REPORT_CAPTURE_THRESHOLDS,
@@ -114,6 +120,7 @@ from spectral_packet_engine.state import (
     GaussianPacketParameters,
     PacketState,
     PacketSupportDiagnostics,
+    SpectralState,
     make_truncated_gaussian_packet,
 )
 from spectral_packet_engine.table_io import (
@@ -441,7 +448,9 @@ class ForwardSimulationSummary:
     density_matrix: StateDensityMatrixDiagnostics
     phase_space: StatePhaseSpaceDiagnostics
     truncation: SpectralTruncationSummary
-    initial_support: PacketSupportDiagnostics
+    initial_support: PacketSupportDiagnostics | None
+    tracked_interval: Tensor | None = None
+    tracked_interval_probability: Tensor | None = None
 
 
 def _coerce_packet_state_to_context(context: EngineContext, packet: PacketState) -> PacketState:
@@ -453,25 +462,76 @@ def _coerce_packet_state_to_context(context: EngineContext, packet: PacketState)
     )
 
 
-def _simulate_packet_state_with_context(
+def _coerce_spectral_state_to_context(context: EngineContext, state: SpectralState) -> SpectralState:
+    coefficients = state.coefficients.to(dtype=context.domain.complex_dtype, device=context.domain.device)
+    current_modes = int(coefficients.shape[0])
+    target_modes = context.basis.num_modes
+    if current_modes > target_modes:
+        raise ValueError(
+            f"spectral state provides {current_modes} coefficients but the engine retains only {target_modes} modes"
+        )
+    if current_modes < target_modes:
+        padded = torch.zeros(target_modes, dtype=context.domain.complex_dtype, device=context.domain.device)
+        padded[:current_modes] = coefficients
+        coefficients = padded
+    return SpectralState(domain=context.domain, coefficients=coefficients)
+
+
+def _coerce_interval_to_context(
+    interval: Sequence[float] | Tensor | None,
+    *,
+    context: EngineContext,
+) -> tuple[float, float] | None:
+    if interval is None:
+        return None
+    interval_tensor = torch.as_tensor(interval, dtype=context.domain.real_dtype, device=context.domain.device).reshape(-1)
+    if interval_tensor.shape[0] != 2:
+        raise ValueError("interval must contain exactly two endpoints")
+    left = float(interval_tensor[0].item())
+    right = float(interval_tensor[1].item())
+    if right < left:
+        raise ValueError("interval requires right >= left")
+    return left, right
+
+
+def _domain_signature(domain: InfiniteWell1D) -> tuple[float, float, float, float]:
+    return (
+        float(domain.left.detach().cpu().item()),
+        float(domain.length.detach().cpu().item()),
+        float(domain.mass.detach().cpu().item()),
+        float(domain.hbar.detach().cpu().item()),
+    )
+
+
+def _simulate_state_with_context(
     context: EngineContext,
     *,
-    packet: PacketState,
+    initial_state: PacketState | SpectralState,
     evaluation_times: Tensor,
     grid: Tensor,
+    initial_support: PacketSupportDiagnostics | None,
+    interval: tuple[float, float] | None = None,
 ) -> ForwardSimulationSummary:
-    packet = _coerce_packet_state_to_context(context, packet)
-    initial_state = context.projector.project_packet(packet)
+    if isinstance(initial_state, PacketState):
+        prepared_state = _coerce_packet_state_to_context(context, initial_state)
+        spectral_state = context.projector.project_packet(prepared_state)
+        initial_wavefunction = prepared_state.wavefunction(grid)
+    elif isinstance(initial_state, SpectralState):
+        prepared_state = _coerce_spectral_state_to_context(context, initial_state)
+        spectral_state = prepared_state
+        initial_wavefunction = prepared_state.wavefunction(grid)
+    else:
+        raise TypeError("initial_state must be a PacketState or SpectralState")
     record = simulate(
-        packet,
+        prepared_state,
         evaluation_times,
         projector=context.projector,
         propagator=context.propagator,
         grid=grid,
     )
     midpoint = context.domain.midpoint
-    initial_wavefunction = packet.wavefunction(grid)
     position_variance = record.variance_position()
+    tracked_interval_probability = None if interval is None else record.interval_probability(interval[0], interval[1])
     return ForwardSimulationSummary(
         runtime=context.runtime,
         times=record.times,
@@ -483,12 +543,14 @@ def _simulate_packet_state_with_context(
         left_probability=record.interval_probability(context.domain.left, midpoint),
         right_probability=record.interval_probability(midpoint, context.domain.right),
         total_probability=record.total_probability(),
-        spectral_norm=initial_state.norm_squared,
+        spectral_norm=spectral_state.norm_squared,
         spatial_norm=total_probability(initial_wavefunction, grid),
         density_matrix=analyze_state_density_matrix(record.coefficients),
         phase_space=analyze_state_phase_space(record.coefficients, context.basis),
-        truncation=summarize_spectral_coefficients(initial_state.coefficients),
-        initial_support=packet.support_diagnostics(),
+        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+        initial_support=initial_support,
+        tracked_interval=None if interval is None else torch.tensor(interval, dtype=context.domain.real_dtype, device=context.domain.device),
+        tracked_interval_probability=tracked_interval_probability,
     )
 
 
@@ -496,6 +558,7 @@ def simulate_packet_state(
     packet: PacketState,
     *,
     times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
     num_modes: int = 128,
     quadrature_points: int = 4096,
     grid_points: int = 512,
@@ -512,11 +575,13 @@ def simulate_packet_state(
     )
     grid = context.domain.grid(grid_points)
     evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
-    return _simulate_packet_state_with_context(
+    return _simulate_state_with_context(
         context,
-        packet=packet,
+        initial_state=packet,
         evaluation_times=evaluation_times,
         grid=grid,
+        initial_support=packet.support_diagnostics(),
+        interval=_coerce_interval_to_context(interval, context=context),
     )
 
 
@@ -528,6 +593,7 @@ def simulate_gaussian_packet(
     phase: float = 0.0,
     weight: complex = 1.0 + 0.0j,
     times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
     num_modes: int = 128,
     quadrature_points: int = 4096,
     grid_points: int = 512,
@@ -550,10 +616,43 @@ def simulate_gaussian_packet(
     return simulate_packet_state(
         packet,
         times=times,
+        interval=interval,
         num_modes=num_modes,
         quadrature_points=quadrature_points,
         grid_points=grid_points,
         device=runtime.device,
+    )
+
+
+def simulate_spectral_state(
+    spectral_state: SpectralState,
+    *,
+    times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
+    num_modes: int | None = None,
+    quadrature_points: int = 4096,
+    grid_points: int = 512,
+    device: str | torch.device | None = "auto",
+) -> ForwardSimulationSummary:
+    resolved_num_modes = spectral_state.num_modes if num_modes is None else int(num_modes)
+    context = build_engine(
+        num_modes=resolved_num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(spectral_state.domain.length.detach().cpu().item()),
+        left=float(spectral_state.domain.left.detach().cpu().item()),
+        mass=float(spectral_state.domain.mass.detach().cpu().item()),
+        hbar=float(spectral_state.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    grid = context.domain.grid(grid_points)
+    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
+    return _simulate_state_with_context(
+        context,
+        initial_state=spectral_state,
+        evaluation_times=evaluation_times,
+        grid=grid,
+        initial_support=None,
+        interval=_coerce_interval_to_context(interval, context=context),
     )
 
 
@@ -566,7 +665,29 @@ class PacketProjectionSummary:
     density_matrix: StateDensityMatrixDiagnostics
     phase_space: StatePhaseSpaceDiagnostics
     truncation: SpectralTruncationSummary
-    initial_support: PacketSupportDiagnostics
+    initial_support: PacketSupportDiagnostics | None
+
+
+@dataclass(frozen=True, slots=True)
+class ComparedStateSummary:
+    label: str
+    representation: str
+    analysis: QuantumStateReport
+    forward: ForwardSimulationSummary
+
+
+@dataclass(frozen=True, slots=True)
+class StatePairComparisonSummary:
+    label_a: str
+    label_b: str
+    comparison: StateComparisonReport
+
+
+@dataclass(frozen=True, slots=True)
+class StateTrajectoryComparisonSummary:
+    interval: tuple[float, float] | None
+    states: tuple[ComparedStateSummary, ...]
+    pairs: tuple[StatePairComparisonSummary, ...]
 
 
 def project_packet_state(
@@ -604,6 +725,77 @@ def project_packet_state(
     )
 
 
+def project_wavefunction_state(
+    wavefunction,
+    grid,
+    *,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    device: str | torch.device | None = "auto",
+) -> PacketProjectionSummary:
+    spatial_grid = torch.as_tensor(grid, dtype=torch.float64)
+    if spatial_grid.ndim != 1:
+        raise ValueError("grid must be one-dimensional")
+    if spatial_grid.shape[0] < 2:
+        raise ValueError("grid must contain at least two points")
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float((spatial_grid[-1] - spatial_grid[0]).item()),
+        left=float(spatial_grid[0].item()),
+        device=device,
+    )
+    evaluation_grid = spatial_grid.to(dtype=context.domain.real_dtype, device=context.domain.device)
+    if not torch.all(evaluation_grid[1:] > evaluation_grid[:-1]).item():
+        raise ValueError("grid must be strictly increasing")
+    values = coerce_tensor(wavefunction, dtype=context.domain.complex_dtype, device=context.domain.device)
+    if values.ndim != 1:
+        raise ValueError("wavefunction must be one-dimensional")
+    spectral_state = context.projector.project_wavefunction(values, evaluation_grid)
+    reconstruction = context.projector.reconstruct(spectral_state, evaluation_grid)
+    reconstruction_error = torch.sqrt(total_probability(reconstruction - values, evaluation_grid))
+    return PacketProjectionSummary(
+        runtime=context.runtime,
+        coefficients=spectral_state.coefficients,
+        reconstruction_error=reconstruction_error,
+        spectral_norm=spectral_state.norm_squared,
+        density_matrix=analyze_state_density_matrix(spectral_state.coefficients),
+        phase_space=analyze_state_phase_space(spectral_state.coefficients, context.basis),
+        truncation=summarize_spectral_coefficients(spectral_state.coefficients),
+        initial_support=None,
+    )
+
+
+def project_spectral_state(
+    spectral_state: SpectralState,
+    *,
+    num_modes: int | None = None,
+    quadrature_points: int = 4096,
+    device: str | torch.device | None = "auto",
+) -> PacketProjectionSummary:
+    resolved_num_modes = spectral_state.num_modes if num_modes is None else int(num_modes)
+    context = build_engine(
+        num_modes=resolved_num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(spectral_state.domain.length.detach().cpu().item()),
+        left=float(spectral_state.domain.left.detach().cpu().item()),
+        mass=float(spectral_state.domain.mass.detach().cpu().item()),
+        hbar=float(spectral_state.domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    prepared_state = _coerce_spectral_state_to_context(context, spectral_state)
+    return PacketProjectionSummary(
+        runtime=context.runtime,
+        coefficients=prepared_state.coefficients,
+        reconstruction_error=torch.zeros((), dtype=context.domain.real_dtype, device=context.domain.device),
+        spectral_norm=prepared_state.norm_squared,
+        density_matrix=analyze_state_density_matrix(prepared_state.coefficients),
+        phase_space=analyze_state_phase_space(prepared_state.coefficients, context.basis),
+        truncation=summarize_spectral_coefficients(prepared_state.coefficients),
+        initial_support=None,
+    )
+
+
 def project_gaussian_packet(
     *,
     center: float = 0.30,
@@ -636,6 +828,101 @@ def project_gaussian_packet(
         quadrature_points=quadrature_points,
         grid_points=grid_points,
         device=runtime.device,
+    )
+
+
+def compare_state_trajectories(
+    states: Mapping[str, PacketState | SpectralState] | Sequence[tuple[str, PacketState | SpectralState]],
+    *,
+    times: Sequence[float] = (0.0, 1e-3, 5e-3),
+    interval: Sequence[float] | None = None,
+    num_modes: int = 128,
+    quadrature_points: int = 4096,
+    grid_points: int = 512,
+    device: str | torch.device | None = "auto",
+) -> StateTrajectoryComparisonSummary:
+    if isinstance(states, Mapping):
+        named_states = list(states.items())
+    else:
+        named_states = list(states)
+    if len(named_states) < 2:
+        raise ValueError("compare_state_trajectories requires at least two labeled states")
+
+    reference_state = named_states[0][1]
+    reference_domain = reference_state.domain
+    reference_signature = _domain_signature(reference_domain)
+    context = build_engine(
+        num_modes=num_modes,
+        quadrature_points=quadrature_points,
+        domain_length=float(reference_domain.length.detach().cpu().item()),
+        left=float(reference_domain.left.detach().cpu().item()),
+        mass=float(reference_domain.mass.detach().cpu().item()),
+        hbar=float(reference_domain.hbar.detach().cpu().item()),
+        device=device,
+    )
+    grid = context.domain.grid(grid_points)
+    evaluation_times = torch.as_tensor(times, dtype=context.domain.real_dtype, device=context.domain.device)
+    tracked_interval = _coerce_interval_to_context(interval, context=context)
+
+    state_summaries: list[ComparedStateSummary] = []
+    spectral_states: list[tuple[str, SpectralState]] = []
+    for label, state in named_states:
+        if _domain_signature(state.domain) != reference_signature:
+            raise ValueError("all compared states must share the same bounded domain parameters")
+        if isinstance(state, PacketState):
+            forward = _simulate_state_with_context(
+                context,
+                initial_state=state,
+                evaluation_times=evaluation_times,
+                grid=grid,
+                initial_support=state.support_diagnostics(),
+                interval=tracked_interval,
+            )
+            spectral_state = context.projector.project_packet(_coerce_packet_state_to_context(context, state))
+            representation = "packet"
+        elif isinstance(state, SpectralState):
+            forward = _simulate_state_with_context(
+                context,
+                initial_state=state,
+                evaluation_times=evaluation_times,
+                grid=grid,
+                initial_support=None,
+                interval=tracked_interval,
+            )
+            spectral_state = _coerce_spectral_state_to_context(context, state)
+            representation = "spectral"
+        else:
+            raise TypeError("compare_state_trajectories accepts only PacketState or SpectralState values")
+
+        spectral_states.append((label, spectral_state))
+        state_summaries.append(
+            ComparedStateSummary(
+                label=label,
+                representation=representation,
+                analysis=analyze_quantum_state(spectral_state.coefficients, context.basis),
+                forward=forward,
+            )
+        )
+
+    pair_summaries: list[StatePairComparisonSummary] = []
+    for index, (label_a, state_a) in enumerate(spectral_states):
+        for label_b, state_b in spectral_states[index + 1 :]:
+            pair_summaries.append(
+                StatePairComparisonSummary(
+                    label_a=label_a,
+                    label_b=label_b,
+                    comparison=compare_quantum_states(
+                        state_a.coefficients,
+                        state_b.coefficients,
+                        context.basis,
+                    ),
+                )
+            )
+
+    return StateTrajectoryComparisonSummary(
+        interval=tracked_interval,
+        states=tuple(state_summaries),
+        pairs=tuple(pair_summaries),
     )
 
 
@@ -2708,11 +2995,12 @@ def simulate_packet_sweep(
             wavenumber=float(spec["wavenumber"]),
             phase=float(spec.get("phase", 0.0)),
         )
-        summary = _simulate_packet_state_with_context(
+        summary = _simulate_state_with_context(
             context,
-            packet=packet,
+            initial_state=packet,
             evaluation_times=evaluation_times,
             grid=grid,
+            initial_support=packet.support_diagnostics(),
         )
         items.append(
             PacketSweepItemSummary(
@@ -2737,6 +3025,7 @@ def simulate_packet_sweep(
 
 __all__ = [
     "CaptureModeBudget",
+    "ComparedStateSummary",
     "ControlObjective",
     "ControlWorkflowSummary",
     "CoupledChannelSurfaceSummary",
@@ -2773,6 +3062,8 @@ __all__ = [
     "ProfileTableSummary",
     "RadialReductionSummary",
     "SeparableSpectrumSummary",
+    "StatePairComparisonSummary",
+    "StateTrajectoryComparisonSummary",
     "SpectroscopyWorkflowSummary",
     "TabularDatasetSummary",
     "TensorFlowEvaluationSummary",
@@ -2791,6 +3082,7 @@ __all__ = [
     "calibrate_potential_from_spectrum",
     "coerce_database_table_types",
     "build_engine",
+    "compare_state_trajectories",
     "compare_profile_tables",
     "compute_packet_observable_gradient",
     "compress_profile_table",
@@ -2824,6 +3116,8 @@ __all__ = [
     "load_profile_table_report",
     "load_tabular_dataset_from_path",
     "make_packet_state",
+    "project_spectral_state",
+    "project_wavefunction_state",
     "project_packet_state",
     "materialize_database_query",
     "materialize_profile_table_from_database_query",
@@ -2838,6 +3132,7 @@ __all__ = [
     "run_transport_resonance_workflow",
     "simulate_gaussian_packet",
     "simulate_packet_state",
+    "simulate_spectral_state",
     "simulate_packet_sweep",
     "solve_radial_reduction",
     "summarize_database_query_result",

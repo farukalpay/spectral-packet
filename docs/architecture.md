@@ -56,7 +56,7 @@ The core mathematical engine lives in:
 
 `physics_contracts.py` owns the shared `PotentialFamily`, `HamiltonianOperator`, `BasisSpec`, `BoundaryCondition`, `ObservableSet`, and `MeasurementModel` contract so forward, inverse, reduced-model, and surrogate workflows can refer to the same mathematical problem object.
 
-`state.py` owns packet-family preparation and bounded-support diagnostics. Gaussian packets remain a supported analytic family, but the core state layer is not Gaussian-only; reusable packet families project through the same spectral engine and surface explicit domain-support and boundary-mismatch evidence instead of burying those assumptions in interface wrappers.
+`state.py` owns packet-family preparation and bounded-support diagnostics. Gaussian packets remain a supported analytic family, but the core state layer is not Gaussian-only; reusable packet families and exact spectral-mode helpers project through the same spectral engine and surface explicit domain-support and boundary-mismatch evidence instead of burying those assumptions in interface wrappers.
 
 Advanced physics modules:
 
@@ -95,7 +95,7 @@ Shared user-facing workflows live in:
 - `src/spectral_packet_engine/benchmark_registry.py`
 
 This layer is the conductor between the engine and the public interfaces.
-It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, benchmark evidence, vertical workflows, and shared packet-state diagnostics such as density-matrix and Wigner phase-space summaries are surfaced before any interface wrapper sees them.
+It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, benchmark evidence, vertical workflows, shared packet/state diagnostics such as density-matrix and Wigner phase-space summaries, and multi-state boxed comparison workflows are surfaced before any interface wrapper sees them.
 
 ### 3. Data and storage bridge
 
@@ -128,6 +128,8 @@ The public wrappers live in:
 - `src/spectral_packet_engine/interfaces.py`
 
 These should stay thin. New product capability belongs in the workflow layer first, then in interface wrappers.
+
+The MCP surface may normalize explicit JSON state specifications into shared packet or spectral workflows, but the numerical logic still belongs in the library layer rather than in wrapper-local scripts or heuristics.
 
 ## Architectural Rules
 

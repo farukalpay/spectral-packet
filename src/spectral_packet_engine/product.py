@@ -257,8 +257,9 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
         label="Forward Packet",
         summary=(
             "Propagate a bounded-domain packet and return density, uncertainty, density-matrix, and "
-            "phase-space diagnostics. The Python surface accepts a generic PacketState; CLI, MCP, and API "
-            "currently expose the single-packet Gaussian preparation subset."
+            "phase-space diagnostics. The Python surface accepts a generic PacketState; MCP additionally "
+            "accepts explicit bounded-state specifications, while CLI and API currently expose the "
+            "single-packet Gaussian preparation subset."
         ),
         surfaces=WorkflowSurfaceBindings(
             python="simulate_packet_state(...)",
@@ -274,14 +275,27 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
         summary=(
             "Project a bounded-domain packet onto the retained sine basis and return modal coefficients, "
             "truncation diagnostics, density-matrix diagnostics, and phase-space diagnostics. The Python "
-            "surface accepts a generic PacketState; CLI, MCP, and API currently expose the single-packet "
-            "Gaussian preparation subset."
+            "surface accepts generic PacketState and SpectralState inputs; MCP additionally accepts explicit "
+            "bounded-state specifications, while CLI and API currently expose the single-packet Gaussian "
+            "preparation subset."
         ),
         surfaces=WorkflowSurfaceBindings(
             python="project_packet_state(...)",
             cli="project",
             mcp="project_packet",
             api="POST /project",
+        ),
+    ),
+    WorkflowIdentity(
+        workflow_id="compare-box-states",
+        label="Compare Box States",
+        summary=(
+            "Compare multiple bounded-domain candidate states in one shared workflow, returning per-state "
+            "forward diagnostics plus pairwise fidelity, trace-distance, momentum, and uncertainty summaries."
+        ),
+        surfaces=WorkflowSurfaceBindings(
+            python="compare_state_trajectories(...)",
+            mcp="compare_box_states",
         ),
     ),
     WorkflowIdentity(
@@ -1100,19 +1114,19 @@ def inspect_product_identity() -> ProductIdentityReport:
         glue_burdens=(
             "Users still have to join model labels explicitly after feature export.",
             "Cross-step continuation still depends on artifact inspection and workflow guidance rather than a single end-to-end chained workflow.",
-            "Operational packet workflows still expose Gaussian wrapper inputs even though the shared Python engine supports generic PacketState objects.",
+            "CLI and API packet wrappers are still narrower than the Python and MCP packet/state surfaces.",
         ),
         adoption_priorities=(
             "Make report-first, inverse reconstruction, and spectral feature-model loops the default product language across Python, CLI, MCP, and API.",
             "Push more intent-aware workflow guidance into MCP so clients ask for outcomes instead of inventing tool sequences.",
-            "Keep generic packet propagation and projection visible in the shared workflow catalog even when operational wrappers intentionally expose a narrower Gaussian subset.",
+            "Keep generic packet propagation, projection, and comparison visible in the shared workflow catalog even when some operational wrappers intentionally expose narrower packet subsets.",
             "Keep artifacts as the continuity layer so every high-value loop ends with inspectable outputs and a clear next step.",
         ),
         notes=(
             "Python is the primary surface; CLI, MCP, and API wrap the same shared workflows.",
             "File-backed and SQL-backed inputs converge through explicit table materialization before entering spectral workflows.",
-            "Generic packet projection and propagation are first-class Python workflows; current CLI, MCP, and API wrappers expose a Gaussian single-packet subset rather than arbitrary packet construction.",
-            "When execute_python is disabled in an MCP runtime, Lightcap should not assume arbitrary packet construction is available beyond the dedicated bounded tools.",
+            "Generic packet projection, propagation, and state comparison are first-class Python workflows; MCP also accepts explicit bounded-state specifications for Gaussian, plane-wave, windowed plane-wave, box-mode, sampled-wavefunction, and spectral-coefficient inputs.",
+            "When execute_python is disabled in an MCP runtime, Lightcap should still rely on the dedicated bounded-state tools rather than assuming arbitrary local Python execution is available.",
             "Modal-surrogate and tree-model workflows remain extensions over the spectral spine rather than a separate product identity.",
             "The default adoption path is report-first: validate structure, analyze modes, compress, write artifacts, then choose inverse or feature-model follow-up workflows from evidence.",
         ),

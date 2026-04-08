@@ -285,6 +285,169 @@ class PlaneWavePacketParameters:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowedPlaneWavePacketParameters:
+    center: Tensor
+    window_width: Tensor
+    wavenumber: Tensor
+    phase: Tensor = field(default_factory=lambda: torch.tensor([0.0], dtype=torch.float64))
+
+    def __post_init__(self) -> None:
+        center = _coerce_parameter_vector(self.center, dtype=None, device=None)
+        window_width = _coerce_parameter_vector(self.window_width, dtype=center.dtype, device=center.device)
+        wavenumber = _coerce_parameter_vector(
+            self.wavenumber,
+            dtype=center.dtype,
+            device=center.device,
+        )
+        phase = _coerce_parameter_vector(self.phase, dtype=center.dtype, device=center.device)
+
+        if not (center.shape == window_width.shape == wavenumber.shape == phase.shape):
+            raise ValueError("center, window_width, wavenumber, and phase must have matching shapes")
+        if not torch.all(window_width > 0).item():
+            raise ValueError("window widths must be positive")
+
+        object.__setattr__(self, "center", center)
+        object.__setattr__(self, "window_width", window_width)
+        object.__setattr__(self, "wavenumber", wavenumber)
+        object.__setattr__(self, "phase", phase)
+
+    @property
+    def packet_count(self) -> int:
+        return int(self.center.shape[0])
+
+    def _support_edges(self) -> tuple[Tensor, Tensor]:
+        half_width = 0.5 * self.window_width
+        return self.center - half_width, self.center + half_width
+
+    def _full_support_mass(self) -> Tensor:
+        return 3.0 * self.window_width / 8.0
+
+    def _normalized_coordinate(self, x: Tensor) -> Tensor:
+        return 2.0 * (x - self.center[:, None]) / self.window_width[:, None]
+
+    def _density_antiderivative(self, u: Tensor) -> Tensor:
+        pi = torch.tensor(torch.pi, dtype=u.dtype, device=u.device)
+        return (
+            (3.0 * u / 8.0)
+            + torch.sin(pi * u) / (2.0 * pi)
+            + torch.sin(2.0 * pi * u) / (16.0 * pi)
+        )
+
+    def _clipped_support_mass(self, domain: InfiniteWell1D) -> Tensor:
+        support_left, support_right = self._support_edges()
+        clipped_left = torch.maximum(support_left, domain.left)
+        clipped_right = torch.minimum(support_right, domain.right)
+        zero = torch.zeros_like(clipped_left)
+        valid = clipped_right > clipped_left
+        left_u = 2.0 * (clipped_left - self.center) / self.window_width
+        right_u = 2.0 * (clipped_right - self.center) / self.window_width
+        clipped_mass = 0.5 * self.window_width * (
+            self._density_antiderivative(right_u) - self._density_antiderivative(left_u)
+        )
+        return torch.where(valid, clipped_mass, zero)
+
+    def component_normalizations(self, domain: InfiniteWell1D) -> Tensor:
+        interval_mass = self._clipped_support_mass(domain)
+        if torch.any(interval_mass <= 0).item():
+            raise ValueError("windowed plane-wave support must overlap the bounded domain")
+        scale = torch.rsqrt(
+            torch.clamp(
+                interval_mass,
+                min=torch.finfo(domain.real_dtype).tiny,
+            )
+        )
+        return scale.to(dtype=domain.complex_dtype)
+
+    def to(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device | str | None,
+    ) -> "WindowedPlaneWavePacketParameters":
+        return WindowedPlaneWavePacketParameters(
+            center=self.center.to(dtype=dtype, device=device),
+            window_width=self.window_width.to(dtype=dtype, device=device),
+            wavenumber=self.wavenumber.to(dtype=dtype, device=device),
+            phase=self.phase.to(dtype=dtype, device=device),
+        )
+
+    def component_wavefunctions(
+        self,
+        domain: InfiniteWell1D,
+        x,
+        *,
+        normalize: bool = True,
+    ) -> Tensor:
+        grid = coerce_tensor(x, dtype=domain.real_dtype, device=domain.device)
+        flat_grid = grid.reshape(-1)
+        normalized_coordinate = self._normalized_coordinate(flat_grid)
+        within_window = torch.abs(normalized_coordinate) <= 1.0
+        envelope = torch.where(
+            within_window,
+            torch.cos(0.5 * torch.pi * normalized_coordinate) ** 2,
+            torch.zeros_like(normalized_coordinate),
+        )
+        oscillation = torch.exp(
+            1j * (
+                self.wavenumber[:, None] * flat_grid[None, :]
+                + self.phase[:, None]
+            )
+        ).to(dtype=domain.complex_dtype)
+        components = envelope.to(dtype=domain.complex_dtype) * oscillation
+        support = _strict_domain_support(domain, flat_grid)[None, :]
+        components = torch.where(support, components, torch.zeros_like(components))
+        if normalize:
+            components = self.component_normalizations(domain)[:, None] * components
+        return components.reshape(self.packet_count, *grid.shape)
+
+    def support_diagnostics(self, domain: InfiniteWell1D) -> PacketSupportDiagnostics:
+        full_mass = self._full_support_mass()
+        inside_mass = torch.clamp(self._clipped_support_mass(domain) / full_mass, min=0.0, max=1.0)
+        outside_mass = torch.clamp(1.0 - inside_mass, min=0.0, max=1.0)
+        left_u = 2.0 * (domain.left - self.center) / self.window_width
+        right_u = 2.0 * (domain.right - self.center) / self.window_width
+        left_density = torch.where(
+            torch.abs(left_u) <= 1.0,
+            (torch.cos(0.5 * torch.pi * left_u) ** 4) / full_mass,
+            torch.zeros_like(left_u),
+        )
+        right_density = torch.where(
+            torch.abs(right_u) <= 1.0,
+            (torch.cos(0.5 * torch.pi * right_u) ** 4) / full_mass,
+            torch.zeros_like(right_u),
+        )
+        return PacketSupportDiagnostics(
+            inside_probability_mass=inside_mass,
+            outside_probability_mass=outside_mass,
+            left_boundary_density=left_density,
+            right_boundary_density=right_density,
+            boundary_density_mismatch=left_density + right_density,
+        )
+
+    @classmethod
+    def single(
+        cls,
+        *,
+        center,
+        window_width,
+        wavenumber,
+        phase=0.0,
+        dtype: torch.dtype = torch.float64,
+        device: torch.device | str | None = None,
+    ) -> "WindowedPlaneWavePacketParameters":
+        center_tensor = coerce_tensor(center, dtype=dtype, device=device)
+        width_tensor = coerce_tensor(window_width, dtype=dtype, device=device)
+        wavenumber_tensor = coerce_tensor(wavenumber, dtype=dtype, device=device)
+        phase_tensor = coerce_tensor(phase, dtype=dtype, device=device)
+        return cls(
+            center=torch.atleast_1d(center_tensor),
+            window_width=torch.atleast_1d(width_tensor),
+            wavenumber=torch.atleast_1d(wavenumber_tensor),
+            phase=torch.atleast_1d(phase_tensor),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PacketState:
     domain: InfiniteWell1D
     parameters: PacketParameterization
@@ -414,6 +577,56 @@ def make_plane_wave_packet(
     return PacketState(domain=domain, parameters=parameters, weights=weight_tensor)
 
 
+def make_windowed_plane_wave_packet(
+    domain: InfiniteWell1D,
+    *,
+    center,
+    window_width,
+    wavenumber,
+    phase=0.0,
+    weight=1.0 + 0.0j,
+) -> PacketState:
+    parameters = WindowedPlaneWavePacketParameters.single(
+        center=center,
+        window_width=window_width,
+        wavenumber=wavenumber,
+        phase=phase,
+        dtype=domain.real_dtype,
+        device=domain.device,
+    )
+    weight_tensor = coerce_scalar_tensor(
+        torch.as_tensor(weight, dtype=domain.complex_dtype, device=domain.device),
+        dtype=domain.complex_dtype,
+        device=domain.device,
+    ).reshape(1)
+    return PacketState(domain=domain, parameters=parameters, weights=weight_tensor)
+
+
+def make_box_mode_spectral_state(
+    domain: InfiniteWell1D,
+    *,
+    mode_index: int,
+    num_modes: int | None = None,
+    weight=1.0 + 0.0j,
+) -> SpectralState:
+    resolved_num_modes = int(mode_index if num_modes is None else num_modes)
+    if int(mode_index) < 1:
+        raise ValueError("mode_index must be at least 1")
+    if resolved_num_modes < int(mode_index):
+        raise ValueError("num_modes must be at least mode_index")
+    coefficients = torch.zeros(
+        resolved_num_modes,
+        dtype=domain.complex_dtype,
+        device=domain.device,
+    )
+    coefficients[int(mode_index) - 1] = coerce_scalar_tensor(
+        torch.as_tensor(weight, dtype=domain.complex_dtype, device=domain.device),
+        dtype=domain.complex_dtype,
+        device=domain.device,
+    )
+    return SpectralState(domain=domain, coefficients=coefficients)
+
+
 __all__ = [
     "GaussianPacketParameters",
     "PacketParameterization",
@@ -421,6 +634,9 @@ __all__ = [
     "PacketState",
     "PlaneWavePacketParameters",
     "SpectralState",
+    "WindowedPlaneWavePacketParameters",
+    "make_box_mode_spectral_state",
     "make_plane_wave_packet",
     "make_truncated_gaussian_packet",
+    "make_windowed_plane_wave_packet",
 ]

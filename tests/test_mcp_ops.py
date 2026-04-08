@@ -328,6 +328,69 @@ def test_simulate_packet_tool_exposes_phase_space_diagnostics_when_available() -
     assert "density_matrix" in payload
 
 
+def test_project_packet_tool_accepts_sampled_wavefunction_state_spec_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+    wavefunction_real = [0.0, 1.0, 0.0, -1.0, 0.0]
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "project_packet",
+            {
+                "state": {
+                    "family": "sampled_wavefunction",
+                    "grid": grid,
+                    "wavefunction_real": wavefunction_real,
+                },
+                "num_modes": 32,
+                "quadrature_points": 256,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["initial_support"] is None
+    assert payload["spectral_norm"] > 0.0
+    assert "phase_space" in payload
+
+
+def test_compare_box_states_tool_returns_pairwise_diagnostics_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "compare_box_states",
+            {
+                "states": [
+                    {"label": "windowed", "family": "windowed_plane_wave", "center": 0.35, "window_width": 0.24, "wavenumber": 20.0},
+                    {"label": "mode", "family": "box_mode", "mode_index": 8},
+                ],
+                "times": [0.0, 0.001],
+                "interval": [0.55, 0.9],
+                "num_modes": 64,
+                "quadrature_points": 512,
+                "grid_points": 64,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert payload["interval"] == pytest.approx([0.55, 0.9])
+    assert len(payload["states"]) == 2
+    assert len(payload["pairs"]) == 1
+    assert payload["states"][0]["forward"]["tracked_interval_probability"] is not None
+    assert payload["pairs"][0]["comparison"]["fidelity"] < 0.999
+
+
 def test_streamable_http_compatibility_routes_expose_runtime_tools_when_available() -> None:
     pytest.importorskip("mcp.server.fastmcp")
 

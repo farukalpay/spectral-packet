@@ -13,6 +13,8 @@ It is useful when you want:
 
 It is not a separate product. MCP is a machine-facing wrapper over the shared workflow layer.
 
+For bounded-state work, MCP no longer depends on `execute_python` just to leave the Gaussian happy path. The packet tools accept explicit state specifications for `gaussian`, `plane_wave`, `windowed_plane_wave`, `box_mode`, `spectral_coefficients`, and `sampled_wavefunction`.
+
 ## Install
 
 ```bash
@@ -141,8 +143,9 @@ These tools expose the deep physics modules directly to AI clients:
 | Tool | Physics | Key Output |
 | --- | --- | --- |
 | `solve_eigenproblem` | Schrödinger eigenvalue for arbitrary V(x) | Eigenvalues, eigenstates, orthonormality check |
-| `simulate_packet` | Bounded packet propagation | Density snapshots, uncertainty, density-matrix diagnostics, Wigner phase-space diagnostics |
-| `project_packet` | Bounded packet projection | Modal coefficients, reconstruction quality, density-matrix diagnostics, Wigner phase-space diagnostics |
+| `simulate_packet` | Bounded state propagation | Density snapshots, uncertainty, optional interval traces, density-matrix diagnostics, Wigner phase-space diagnostics |
+| `project_packet` | Bounded state projection | Modal coefficients, reconstruction quality, density-matrix diagnostics, Wigner phase-space diagnostics |
+| `compare_box_states` | Multi-state boxed comparison | Per-state forward diagnostics plus pairwise fidelity, trace distance, momentum, and uncertainty comparisons |
 | `split_operator_propagate` | Time-dependent wavepacket propagation | Density evolution, norm/energy conservation |
 | `compute_wigner_function` | Phase-space Wigner distribution | Negativity, marginals, non-classicality |
 | `analyze_density_matrix` | Quantum state characterization | Purity, von Neumann entropy, rank |
@@ -186,6 +189,8 @@ These tools let AI agents manage scratch data, run trusted-only local Python whe
 | `server_info` | Return hostname plus authoritative bind/endpoint facts, version, scratch directory, and runtime config. |
 
 The `execute_python` tool is intentionally disabled by default. It becomes available only when the operator starts the server with `--allow-unsafe-python` for a trusted local session. The `scratch_dir` variable is pre-set to the managed MCP scratch directory reported by `server_info`.
+
+For boxed-state workflows, prefer the dedicated bounded tools over `execute_python`. A client can now compare non-Gaussian candidates in one call by sending `windowed_plane_wave`, `box_mode`, `spectral_coefficients`, or `sampled_wavefunction` state specifications to `compare_box_states`.
 
 For detailed usage sessions and example prompts, see [mcp-usage-guide.md](mcp-usage-guide.md).
 

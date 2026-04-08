@@ -62,13 +62,16 @@ def test_product_identity_report_exposes_one_shared_workflow_map() -> None:
     assert any(workflow.workflow_id == "design-transition" for workflow in report.workflows)
     assert any(workflow.workflow_id == "forward-packet" for workflow in report.workflows)
     assert any(workflow.workflow_id == "project-packet" for workflow in report.workflows)
+    assert any(workflow.workflow_id == "compare-box-states" for workflow in report.workflows)
     assert any(workflow.workflow_id == "profile-inference-workflow" for workflow in report.workflows)
     assert any(workflow.workflow_id == "official-benchmark-registry" for workflow in report.workflows)
     control = next(workflow for workflow in report.workflows if workflow.workflow_id == "optimize-packet-control")
     assert control.surfaces.api == "POST /control/optimize"
     forward = next(workflow for workflow in report.workflows if workflow.workflow_id == "forward-packet")
     assert forward.surfaces.python == "simulate_packet_state(...)"
-    assert any("Gaussian single-packet subset" in note for note in report.notes)
+    compare = next(workflow for workflow in report.workflows if workflow.workflow_id == "compare-box-states")
+    assert compare.surfaces.mcp == "compare_box_states"
+    assert any("explicit bounded-state specifications" in note for note in report.notes)
 
 
 def test_workflow_guide_prefers_report_first_for_file_and_sql_inputs() -> None:
@@ -123,10 +126,17 @@ def test_top_level_all_is_deduplicated() -> None:
     assert "PacketSupportDiagnostics" in spe.__all__
     assert "StatePhaseSpaceDiagnostics" in spe.__all__
     assert "PlaneWavePacketParameters" in spe.__all__
+    assert "WindowedPlaneWavePacketParameters" in spe.__all__
     assert "Separable2DReport" in spe.__all__
     assert "TensorProductBasis2D" in spe.__all__
     assert "build_separable_2d_report" in spe.__all__
+    assert "compare_state_trajectories" in spe.__all__
+    assert "make_box_mode_spectral_state" in spe.__all__
+    assert "make_windowed_plane_wave_packet" in spe.__all__
     assert "project_packet_state" in spe.__all__
+    assert "project_spectral_state" in spe.__all__
+    assert "project_wavefunction_state" in spe.__all__
     assert "run_transport_resonance_workflow" in spe.__all__
     assert "analyze_state_phase_space" in spe.__all__
     assert "simulate_packet_state" in spe.__all__
+    assert "simulate_spectral_state" in spe.__all__

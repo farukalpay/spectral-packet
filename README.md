@@ -165,23 +165,39 @@ print(report.overview.max_absolute_reference_error)
 ```python
 from spectral_packet_engine import (
     InfiniteWell1D,
+    compare_state_trajectories,
+    make_box_mode_spectral_state,
     make_plane_wave_packet,
+    make_windowed_plane_wave_packet,
     project_packet_state,
     simulate_packet_state,
+    simulate_spectral_state,
 )
 
 domain = InfiniteWell1D.from_length(1.0)
 packet = make_plane_wave_packet(domain, wavenumber=9.0)
+windowed = make_windowed_plane_wave_packet(domain, center=0.35, window_width=0.24, wavenumber=20.0)
+mode = make_box_mode_spectral_state(domain, mode_index=8, num_modes=96)
 
 projection = project_packet_state(packet, num_modes=96, device="cpu")
 forward = simulate_packet_state(packet, times=[0.0, 1e-3, 2e-3], num_modes=96, device="cpu")
+spectral_forward = simulate_spectral_state(mode, times=[0.0, 1e-3], interval=[0.55, 0.9], num_modes=96, device="cpu")
+comparison = compare_state_trajectories(
+    [("windowed", windowed), ("mode", mode)],
+    times=[0.0, 1e-3],
+    interval=[0.55, 0.9],
+    num_modes=96,
+    device="cpu",
+)
 
 print(projection.initial_support.boundary_density_mismatch)
 print(forward.position_standard_deviation)
 print(forward.phase_space.negativity)
+print(spectral_forward.tracked_interval_probability)
+print(comparison.pairs[0].comparison.fidelity)
 ```
 
-Input is an explicit bounded-domain packet state. Outputs expose projection quality, support diagnostics, probability-preserving propagation, position-space uncertainty summaries, density-matrix diagnostics, and explicit Wigner phase-space diagnostics without baking Gaussian-only assumptions into the shared workflow layer. Python is the generic packet surface; operational wrappers currently expose a narrower Gaussian preparation subset.
+Input is an explicit bounded-domain packet or spectral state. Outputs expose projection quality, support diagnostics, probability-preserving propagation, interval traces, position-space uncertainty summaries, density-matrix diagnostics, explicit Wigner phase-space diagnostics, and pairwise state-comparison summaries without baking Gaussian-only assumptions into the shared workflow layer. Python remains the most general surface; MCP now also accepts explicit bounded-state specifications when `execute_python` is unavailable.
 
 ### Official benchmark registry
 
