@@ -296,6 +296,36 @@ def test_optimize_packet_control_tool_accepts_interval_probability_when_availabl
     assert payload["final_interval_probability"] is not None
     assert payload["density_matrix"]["normalized_is_pure"] is True
     assert "trace_defect" in payload["density_matrix"]
+    assert "phase_space" in payload
+    assert "negativity" in payload["phase_space"]
+
+
+def test_simulate_packet_tool_exposes_phase_space_diagnostics_when_available() -> None:
+    pytest.importorskip("mcp.server.fastmcp")
+
+    from spectral_packet_engine import create_mcp_server
+
+    async def _call():
+        server = create_mcp_server()
+        _, payload = await server.call_tool(
+            "simulate_packet",
+            {
+                "center": 0.22,
+                "width": 0.08,
+                "wavenumber": 14.0,
+                "times": [0.0, 0.001],
+                "num_modes": 32,
+                "quadrature_points": 256,
+                "grid_points": 64,
+                "device": "cpu",
+            },
+        )
+        return payload
+
+    payload = __import__("asyncio").run(_call())
+    assert "phase_space" in payload
+    assert len(payload["phase_space"]["W"]) == 2
+    assert "density_matrix" in payload
 
 
 def test_streamable_http_compatibility_routes_expose_runtime_tools_when_available() -> None:

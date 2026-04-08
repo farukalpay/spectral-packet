@@ -144,9 +144,13 @@ def test_generic_packet_workflows_support_plane_wave_family() -> None:
     assert float(projection.reconstruction_error) < 0.15
     assert torch.isclose(projection.density_matrix.normalized_purity, torch.tensor(1.0, dtype=torch.float64), atol=1e-10).item()
     assert projection.density_matrix.normalized_is_pure.item() is True
+    assert projection.phase_space.W.shape == (64, 64)
+    assert torch.isclose(projection.phase_space.total_integral, projection.spectral_norm, atol=5e-2, rtol=5e-2).item()
     assert projection.initial_support.outside_probability_mass[0].item() == pytest.approx(0.0)
     assert projection.initial_support.boundary_density_mismatch[0].item() > 0.0
     assert torch.allclose(forward.total_probability, torch.ones_like(forward.total_probability), atol=5e-3, rtol=5e-3)
+    assert forward.phase_space.W.shape == (3, 64, 64)
+    assert torch.allclose(forward.phase_space.total_integral, forward.total_probability, atol=5e-2, rtol=5e-2)
 
 
 def test_profile_table_summary_and_compression_sweep() -> None:
@@ -196,6 +200,9 @@ def test_forward_simulation_summary_exposes_position_uncertainty_and_support() -
     assert forward.position_variance.shape == forward.times.shape
     assert forward.position_standard_deviation.shape == forward.times.shape
     assert forward.density_matrix.trace.shape == forward.times.shape
+    assert forward.phase_space.W.shape == (2, 64, 64)
+    assert forward.phase_space.negativity.shape == forward.times.shape
+    assert torch.allclose(forward.phase_space.total_integral, forward.total_probability, atol=5e-2, rtol=5e-2)
     assert torch.allclose(
         forward.density_matrix.normalized_purity,
         torch.ones_like(forward.density_matrix.normalized_purity),

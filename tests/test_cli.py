@@ -305,6 +305,39 @@ def test_cli_optimize_packet_control_accepts_interval_probability_objective(caps
     assert payload["final_interval_probability"] is not None
     assert payload["density_matrix"]["normalized_is_pure"] is True
     assert "trace_defect" in payload["density_matrix"]
+    assert payload["phase_space"]["W"]
+    assert "negativity" in payload["phase_space"]
+
+
+def test_cli_forward_emits_phase_space_diagnostics(capsys) -> None:
+    exit_code = main(
+        [
+            "forward",
+            "--center",
+            "0.22",
+            "--width",
+            "0.08",
+            "--wavenumber",
+            "14.0",
+            "--times",
+            "0.0",
+            "0.001",
+            "--modes",
+            "32",
+            "--quadrature",
+            "256",
+            "--grid",
+            "64",
+            "--device",
+            "cpu",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["phase_space"]["negativity"]
+    assert len(payload["phase_space"]["W"]) == 2
+    assert "density_matrix" in payload
 
 
 def test_cli_inverse_physics_and_reduced_model_commands(tmp_path, capsys) -> None:

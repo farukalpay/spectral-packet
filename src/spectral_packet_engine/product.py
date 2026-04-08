@@ -253,6 +253,38 @@ _WORKFLOW_CATALOG: tuple[WorkflowIdentity, ...] = (
         ),
     ),
     WorkflowIdentity(
+        workflow_id="forward-packet",
+        label="Forward Packet",
+        summary=(
+            "Propagate a bounded-domain packet and return density, uncertainty, density-matrix, and "
+            "phase-space diagnostics. The Python surface accepts a generic PacketState; CLI, MCP, and API "
+            "currently expose the single-packet Gaussian preparation subset."
+        ),
+        surfaces=WorkflowSurfaceBindings(
+            python="simulate_packet_state(...)",
+            cli="forward",
+            mcp="simulate_packet",
+            api="POST /forward",
+        ),
+        artifact_story="Writes forward-simulation artifacts through the shared artifact layer when an output directory is requested.",
+    ),
+    WorkflowIdentity(
+        workflow_id="project-packet",
+        label="Project Packet",
+        summary=(
+            "Project a bounded-domain packet onto the retained sine basis and return modal coefficients, "
+            "truncation diagnostics, density-matrix diagnostics, and phase-space diagnostics. The Python "
+            "surface accepts a generic PacketState; CLI, MCP, and API currently expose the single-packet "
+            "Gaussian preparation subset."
+        ),
+        surfaces=WorkflowSurfaceBindings(
+            python="project_packet_state(...)",
+            cli="project",
+            mcp="project_packet",
+            api="POST /project",
+        ),
+    ),
+    WorkflowIdentity(
         workflow_id="analyze-profile-table",
         label="Analyze Profile Table",
         summary="Project a profile table into the bounded-domain modal basis and summarize its spectral structure.",
@@ -1058,7 +1090,7 @@ def inspect_product_identity() -> ProductIdentityReport:
         replaceability_risks=(
             "Without stronger goal-aware routing, the product can still look like a set of technically strong commands organized by transport boundary instead of by user outcome.",
             "Feature modeling and inverse reconstruction still risk feeling like optional add-ons unless the product keeps routing users through report-first loops.",
-            "Hidden or uncatalogued workflows reduce the credibility of the one-engine story and make custom glue feel safer than trusting the product defaults.",
+            "Surface mismatches between the generic Python packet workflows and narrower operational wrappers can still make prompt-side glue feel safer than trusting the product contract.",
         ),
         decision_burdens=(
             "Users still need help choosing between report, inverse-fit, and feature-model intents instead of only choosing between file and SQL inputs.",
@@ -1068,16 +1100,19 @@ def inspect_product_identity() -> ProductIdentityReport:
         glue_burdens=(
             "Users still have to join model labels explicitly after feature export.",
             "Cross-step continuation still depends on artifact inspection and workflow guidance rather than a single end-to-end chained workflow.",
-            "Some adoption-critical workflows existed in code before they were visible in the shared product catalog.",
+            "Operational packet workflows still expose Gaussian wrapper inputs even though the shared Python engine supports generic PacketState objects.",
         ),
         adoption_priorities=(
             "Make report-first, inverse reconstruction, and spectral feature-model loops the default product language across Python, CLI, MCP, and API.",
             "Push more intent-aware workflow guidance into MCP so clients ask for outcomes instead of inventing tool sequences.",
+            "Keep generic packet propagation and projection visible in the shared workflow catalog even when operational wrappers intentionally expose a narrower Gaussian subset.",
             "Keep artifacts as the continuity layer so every high-value loop ends with inspectable outputs and a clear next step.",
         ),
         notes=(
             "Python is the primary surface; CLI, MCP, and API wrap the same shared workflows.",
             "File-backed and SQL-backed inputs converge through explicit table materialization before entering spectral workflows.",
+            "Generic packet projection and propagation are first-class Python workflows; current CLI, MCP, and API wrappers expose a Gaussian single-packet subset rather than arbitrary packet construction.",
+            "When execute_python is disabled in an MCP runtime, Lightcap should not assume arbitrary packet construction is available beyond the dedicated bounded tools.",
             "Modal-surrogate and tree-model workflows remain extensions over the spectral spine rather than a separate product identity.",
             "The default adoption path is report-first: validate structure, analyze modes, compress, write artifacts, then choose inverse or feature-model follow-up workflows from evidence.",
         ),

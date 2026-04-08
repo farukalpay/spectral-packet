@@ -166,6 +166,10 @@ from spectral_packet_engine.vertical_workflows import (
     run_spectroscopy_workflow,
     run_transport_resonance_workflow,
 )
+from spectral_packet_engine.wigner import (
+    StatePhaseSpaceDiagnostics,
+    analyze_state_phase_space,
+)
 
 Tensor = torch.Tensor
 _WorkflowResult = TypeVar("_WorkflowResult")
@@ -435,6 +439,7 @@ class ForwardSimulationSummary:
     spectral_norm: Tensor
     spatial_norm: Tensor
     density_matrix: StateDensityMatrixDiagnostics
+    phase_space: StatePhaseSpaceDiagnostics
     truncation: SpectralTruncationSummary
     initial_support: PacketSupportDiagnostics
 
@@ -481,6 +486,7 @@ def _simulate_packet_state_with_context(
         spectral_norm=initial_state.norm_squared,
         spatial_norm=total_probability(initial_wavefunction, grid),
         density_matrix=analyze_state_density_matrix(record.coefficients),
+        phase_space=analyze_state_phase_space(record.coefficients, context.basis),
         truncation=summarize_spectral_coefficients(initial_state.coefficients),
         initial_support=packet.support_diagnostics(),
     )
@@ -558,6 +564,7 @@ class PacketProjectionSummary:
     reconstruction_error: Tensor
     spectral_norm: Tensor
     density_matrix: StateDensityMatrixDiagnostics
+    phase_space: StatePhaseSpaceDiagnostics
     truncation: SpectralTruncationSummary
     initial_support: PacketSupportDiagnostics
 
@@ -591,6 +598,7 @@ def project_packet_state(
         reconstruction_error=reconstruction_error,
         spectral_norm=spectral_state.norm_squared,
         density_matrix=analyze_state_density_matrix(spectral_state.coefficients),
+        phase_space=analyze_state_phase_space(spectral_state.coefficients, context.basis),
         truncation=summarize_spectral_coefficients(spectral_state.coefficients),
         initial_support=packet.support_diagnostics(),
     )

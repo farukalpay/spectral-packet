@@ -92,6 +92,8 @@ def test_optimize_packet_control_reports_gradient_and_improves_loss() -> None:
     assert tuple(summary.final_density.shape) == (64,)
     assert torch.isclose(summary.density_matrix.normalized_purity, torch.tensor(1.0, dtype=torch.float64), atol=1e-10).item()
     assert summary.density_matrix.normalized_is_pure.item() is True
+    assert summary.phase_space.W.shape == (64, 64)
+    assert torch.isclose(summary.phase_space.total_integral, summary.density_matrix.trace, atol=5e-2, rtol=5e-2).item()
     assert 0.0 <= summary.final_expectation_position <= 1.0
 
 

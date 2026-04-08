@@ -101,7 +101,9 @@ from spectral_packet_engine.split_operator import (
     split_operator_propagate,
 )
 from spectral_packet_engine.wigner import (
+    StatePhaseSpaceDiagnostics,
     WignerResult,
+    analyze_state_phase_space,
     compute_wigner,
     wigner_from_spectral,
 )
@@ -1241,6 +1243,8 @@ __all__ = list(
             "WignerResult",
             "compute_wigner",
             "wigner_from_spectral",
+            "StatePhaseSpaceDiagnostics",
+            "analyze_state_phase_space",
             "DensityMatrixResult",
             "StateDensityMatrixDiagnostics",
             "analyze_density_matrix",
