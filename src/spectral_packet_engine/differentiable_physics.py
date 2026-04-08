@@ -8,6 +8,10 @@ from typing import Literal, Mapping, Sequence, cast
 import torch
 
 from spectral_packet_engine.basis import InfiniteWellBasis
+from spectral_packet_engine.density_matrix import (
+    StateDensityMatrixDiagnostics,
+    analyze_state_density_matrix,
+)
 from spectral_packet_engine.domain import InfiniteWell1D
 from spectral_packet_engine.dynamics import SpectralPropagator
 from spectral_packet_engine.eigensolver import solve_eigenproblem
@@ -34,6 +38,10 @@ from spectral_packet_engine.projector import ProjectionConfig, StateProjector
 from spectral_packet_engine.runtime import TorchRuntime, inspect_torch_runtime
 from spectral_packet_engine.simulation import simulate
 from spectral_packet_engine.state import GaussianPacketParameters, make_truncated_gaussian_packet
+from spectral_packet_engine.wigner import (
+    StatePhaseSpaceDiagnostics,
+    analyze_state_phase_space,
+)
 
 Tensor = torch.Tensor
 ControlObjective = Literal["position", "interval_probability"]
@@ -123,6 +131,8 @@ class PacketControlOptimizationSummary:
     final_density: Tensor
     final_expectation_position: float
     final_interval_probability: float | None
+    density_matrix: StateDensityMatrixDiagnostics
+    phase_space: StatePhaseSpaceDiagnostics
     assumptions: tuple[str, ...]
 
 
@@ -738,6 +748,8 @@ def optimize_packet_control(
         final_density=final_density.detach(),
         final_expectation_position=final_expectation_position,
         final_interval_probability=final_interval_probability,
+        density_matrix=analyze_state_density_matrix(record.coefficients[0]),
+        phase_space=analyze_state_phase_space(record.coefficients[0], basis),
         assumptions=(
             "This workflow optimizes initial packet preparation parameters, not an arbitrary time-dependent control pulse.",
             "Gradients are computed through the bounded-domain spectral projection and propagation stack implemented in PyTorch.",

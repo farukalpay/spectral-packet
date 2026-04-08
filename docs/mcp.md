@@ -141,6 +141,8 @@ These tools expose the deep physics modules directly to AI clients:
 | Tool | Physics | Key Output |
 | --- | --- | --- |
 | `solve_eigenproblem` | Schrödinger eigenvalue for arbitrary V(x) | Eigenvalues, eigenstates, orthonormality check |
+| `simulate_packet` | Bounded packet propagation | Density snapshots, uncertainty, density-matrix diagnostics, Wigner phase-space diagnostics |
+| `project_packet` | Bounded packet projection | Modal coefficients, reconstruction quality, density-matrix diagnostics, Wigner phase-space diagnostics |
 | `split_operator_propagate` | Time-dependent wavepacket propagation | Density evolution, norm/energy conservation |
 | `compute_wigner_function` | Phase-space Wigner distribution | Negativity, marginals, non-classicality |
 | `analyze_density_matrix` | Quantum state characterization | Purity, von Neumann entropy, rank |

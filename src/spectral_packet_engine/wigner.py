@@ -78,6 +78,24 @@ class WignerResult:
     total_integral: Tensor
 
 
+@dataclass(frozen=True, slots=True)
+class StatePhaseSpaceDiagnostics:
+    """Phase-space diagnostics implied by state-vector coefficients.
+
+    The leading dimensions correspond to any batch dimensions carried by the
+    coefficient tensor. The final two dimensions of ``W`` are the shared
+    position and momentum grids used for every analyzed state.
+    """
+
+    x_grid: Tensor
+    p_grid: Tensor
+    W: Tensor
+    x_marginal: Tensor
+    p_marginal: Tensor
+    negativity: Tensor
+    total_integral: Tensor
+
+
 def _interpolate_wavefunction(psi: Tensor, grid: Tensor, x_query: Tensor) -> Tensor:
     """Linear interpolation of a complex wavefunction onto arbitrary query points.
 
@@ -277,8 +295,76 @@ def wigner_from_spectral(
     )
 
 
+def analyze_state_phase_space(
+    coefficients: Tensor,
+    basis: InfiniteWellBasis,
+    *,
+    num_x_points: int = 64,
+    num_p_points: int = 64,
+    p_max: float | None = None,
+) -> StatePhaseSpaceDiagnostics:
+    """Analyze batched state coefficients in phase space via the Wigner map."""
+
+    coeffs = coerce_tensor(
+        coefficients,
+        dtype=basis.domain.complex_dtype,
+        device=basis.domain.device,
+    )
+    if coeffs.ndim == 0:
+        raise ValueError("coefficients must have at least one dimension")
+
+    leading_shape = coeffs.shape[:-1]
+    flat = coeffs.reshape(-1, coeffs.shape[-1])
+
+    x_grid: Tensor | None = None
+    p_grid: Tensor | None = None
+    wigner_values: list[Tensor] = []
+    x_marginals: list[Tensor] = []
+    p_marginals: list[Tensor] = []
+    negativities: list[Tensor] = []
+    total_integrals: list[Tensor] = []
+
+    for vector in flat:
+        result = wigner_from_spectral(
+            vector,
+            basis,
+            num_x_points=num_x_points,
+            num_p_points=num_p_points,
+            p_max=p_max,
+        )
+        if x_grid is None:
+            x_grid = result.x_grid
+            p_grid = result.p_grid
+        wigner_values.append(result.W)
+        x_marginals.append(result.x_marginal)
+        p_marginals.append(result.p_marginal)
+        negativities.append(result.negativity)
+        total_integrals.append(result.total_integral)
+
+    if x_grid is None or p_grid is None:
+        raise ValueError("coefficients must contain at least one state vector")
+
+    wigner_tensor = torch.stack(wigner_values, dim=0).reshape(leading_shape + (x_grid.shape[0], p_grid.shape[0]))
+    x_marginal_tensor = torch.stack(x_marginals, dim=0).reshape(leading_shape + (x_grid.shape[0],))
+    p_marginal_tensor = torch.stack(p_marginals, dim=0).reshape(leading_shape + (p_grid.shape[0],))
+    negativity_tensor = torch.stack(negativities, dim=0).reshape(leading_shape)
+    total_integral_tensor = torch.stack(total_integrals, dim=0).reshape(leading_shape)
+
+    return StatePhaseSpaceDiagnostics(
+        x_grid=x_grid,
+        p_grid=p_grid,
+        W=wigner_tensor,
+        x_marginal=x_marginal_tensor,
+        p_marginal=p_marginal_tensor,
+        negativity=negativity_tensor,
+        total_integral=total_integral_tensor,
+    )
+
+
 __all__ = [
+    "StatePhaseSpaceDiagnostics",
     "WignerResult",
+    "analyze_state_phase_space",
     "compute_wigner",
     "wigner_from_spectral",
 ]

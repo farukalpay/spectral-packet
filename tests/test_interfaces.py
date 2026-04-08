@@ -34,7 +34,10 @@ def test_api_app_health_endpoint(tmp_path) -> None:
     assert product.json()["hero_workflow"]["workflow_id"] == "profile-table-report"
     assert len(product.json()["killer_workflows"]) == 3
     assert any(workflow["workflow_id"] == "infer-potential-spectrum" for workflow in product.json()["workflows"])
+    assert any(workflow["workflow_id"] == "forward-packet" for workflow in product.json()["workflows"])
+    assert any(workflow["workflow_id"] == "project-packet" for workflow in product.json()["workflows"])
     assert any(workflow["workflow_id"] == "profile-inference-workflow" for workflow in product.json()["workflows"])
+    assert any("execute_python is disabled" in note for note in product.json()["notes"])
 
     workflow_guide = client.get("/workflow/guide", params={"input_kind": "profile-table-sql", "goal": "feature-model"})
     assert workflow_guide.status_code == 200
@@ -512,6 +515,8 @@ def test_mcp_product_tool_reports_shared_identity_when_available() -> None:
     assert payload["product_name"] == "Spectral Packet Engine"
     assert payload["hero_workflow"]["workflow_id"] == "profile-table-report"
     assert len(payload["killer_workflows"]) == 3
+    assert any(workflow["workflow_id"] == "forward-packet" for workflow in payload["workflows"])
+    assert any("Gaussian single-packet subset" in note for note in payload["notes"])
 
 
 def test_mcp_workflow_guide_reports_operator_loop_when_available() -> None:

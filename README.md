@@ -178,9 +178,10 @@ forward = simulate_packet_state(packet, times=[0.0, 1e-3, 2e-3], num_modes=96, d
 
 print(projection.initial_support.boundary_density_mismatch)
 print(forward.position_standard_deviation)
+print(forward.phase_space.negativity)
 ```
 
-Input is an explicit bounded-domain packet state. Outputs expose projection quality, support diagnostics, probability-preserving propagation, and position-space uncertainty summaries without baking Gaussian-only assumptions into the shared workflow layer.
+Input is an explicit bounded-domain packet state. Outputs expose projection quality, support diagnostics, probability-preserving propagation, position-space uncertainty summaries, density-matrix diagnostics, and explicit Wigner phase-space diagnostics without baking Gaussian-only assumptions into the shared workflow layer. Python is the generic packet surface; operational wrappers currently expose a narrower Gaussian preparation subset.
 
 ### Official benchmark registry
 

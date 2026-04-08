@@ -95,7 +95,7 @@ Shared user-facing workflows live in:
 - `src/spectral_packet_engine/benchmark_registry.py`
 
 This layer is the conductor between the engine and the public interfaces.
-It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, benchmark evidence, and vertical workflows are surfaced before any interface wrapper sees them.
+It is also where uncertainty/UQ, reduced-model orchestration, differentiable design, benchmark evidence, vertical workflows, and shared packet-state diagnostics such as density-matrix and Wigner phase-space summaries are surfaced before any interface wrapper sees them.
 
 ### 3. Data and storage bridge
 
