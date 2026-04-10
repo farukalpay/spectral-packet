@@ -51,12 +51,16 @@ from spectral_packet_engine.mcp_runtime import (
 )
 from spectral_packet_engine.mcp_security import (
     WriteRateLimiter,
-    backup_table_before_replace,
     check_scratch_file_count,
     check_scratch_total_size,
     check_sql_safety,
     check_sql_script_safety,
     sanitize_filename,
+)
+from spectral_packet_engine.storage_economy import (
+    ManagedSQLiteEconomy,
+    StorageMutationReceipt,
+    resolve_sqlite_database_path,
 )
 from spectral_packet_engine.tool_catalog import ToolCatalog
 from spectral_packet_engine.ml import ModalSurrogateConfig
@@ -610,6 +614,7 @@ def _run_sql_profile_workflow(
     workflow_fn,
     artifact_writer,
     workflow_tag: str,
+    runtime: _MCPExecutionController,
     database: str,
     query: str,
     *,
@@ -625,6 +630,7 @@ def _run_sql_profile_workflow(
     **extra_kwargs,
 ) -> dict[str, Any]:
     """Shared dispatch for SQL-backed profile workflows."""
+    _restore_database_if_needed(runtime, database)
     params = _coerce_parameters(parameters)
     summary = workflow_fn(
         database,
@@ -682,6 +688,49 @@ def _audit_log(config: MCPServerConfig, operation: str, target: str, **extra: An
     with _audit_lock:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line)
+
+
+def _storage_receipt_payload(receipt: StorageMutationReceipt) -> dict[str, Any]:
+    return {
+        "path": receipt.path,
+        "changed_bytes": receipt.changed_bytes,
+        "before_live_bytes": receipt.before_live_bytes,
+        "after_live_bytes": receipt.after_live_bytes,
+        "before_file_bytes": receipt.before_file_bytes,
+        "after_file_bytes": receipt.after_file_bytes,
+        "protected_bytes": receipt.protected_bytes,
+        "balance_before_bytes": receipt.balance_before_bytes,
+        "balance_after_bytes": receipt.balance_after_bytes,
+        "balance_capacity_bytes": receipt.balance_capacity_bytes,
+        "refill_rate_bytes_per_second": receipt.refill_rate_bytes_per_second,
+        "latest_snapshot_path": receipt.latest_snapshot_path,
+    }
+
+
+def _managed_sqlite_path(database: str | Path) -> Path | None:
+    return resolve_sqlite_database_path(database)
+
+
+def _restore_database_if_needed(runtime: _MCPExecutionController, database: str) -> str | None:
+    return runtime._storage_economy.restore_database_if_needed(database)
+
+
+def _mutate_sqlite_database(
+    runtime: _MCPExecutionController,
+    database: str,
+    mutator,
+    *,
+    create_if_missing: bool = True,
+) -> tuple[Any, dict[str, Any] | None]:
+    managed_path = _managed_sqlite_path(database)
+    if managed_path is None:
+        return mutator(database), None
+    result, receipt = runtime._storage_economy.mutate_sqlite(
+        managed_path,
+        lambda candidate_path: mutator(candidate_path),
+        create_if_missing=create_if_missing,
+    )
+    return result, _storage_receipt_payload(receipt)
 
 
 _LOCAL_PATH_PREFIXES = ("/home/", "/tmp/", "/Users/", "/var/", "C:\\", "D:\\")
@@ -801,6 +850,17 @@ class _MCPExecutionController:
         self._rate_lock = Lock()
         # Write-specific rate limiter (stricter)
         self._write_limiter = WriteRateLimiter(config.write_rate_limit_per_minute)
+        self._storage_economy = ManagedSQLiteEconomy(
+            config.storage_guard_directory_path,
+            protection_window_seconds=config.storage_protection_window_seconds,
+            minimum_seed_bytes=config.storage_seed_bytes,
+            minimum_mutation_cost_bytes=config.storage_minimum_mutation_cost_bytes,
+            snapshot_retention=config.storage_snapshot_retention,
+        )
+        self._startup_recoveries = ()
+        if config.restore_managed_databases_on_startup:
+            self._storage_economy.register_existing_databases(config.scratch_directory_path)
+            self._startup_recoveries = self._storage_economy.restore_registered_databases()
 
     def check_rate_limit(self) -> None:
         """Enforce per-minute rate limit across all tool calls."""
@@ -825,7 +885,7 @@ class _MCPExecutionController:
         scratch_dir = self.config.scratch_directory_path
         if not scratch_dir.exists():
             return 0
-        return sum(1 for f in scratch_dir.iterdir() if f.suffix == ".db")
+        return sum(1 for f in scratch_dir.iterdir() if f.suffix.lower() in {".db", ".sqlite", ".sqlite3"})
 
     def acquire(self) -> dict[str, float | int]:
         started = perf_counter()
@@ -2166,14 +2226,26 @@ def create_mcp_server(config: MCPServerConfig | None = None):
 
     @_tool(server, runtime, "inspect_database", "Inspect a database reference and list available tables and capabilities.")
     def inspect_database_tool(database: str) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         return to_serializable(inspect_database(database))
 
     @_tool(server, runtime, "bootstrap_database", "Create or open a local SQLite database path and report its capabilities.")
     def bootstrap_database_tool(database: str) -> dict[str, Any]:
-        return to_serializable(bootstrap_local_database(database))
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: bootstrap_local_database(candidate_database),
+            create_if_missing=True,
+        )
+        payload = to_serializable(result)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        _audit_log(runtime.config, "BOOTSTRAP_DB", database)
+        return payload
 
     @_tool(server, runtime, "describe_database_table", "Describe a database table schema and row count.")
     def describe_database_table_tool(database: str, table_name: str) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         return to_serializable(describe_database_table(database, table_name))
 
     @_tool(
@@ -2194,6 +2266,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         max_rows: int = 500,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         result = materialize_database_query(
             database, query,
             parameters=_coerce_parameters(parameters),
@@ -2239,6 +2312,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     ) -> dict[str, Any]:
         import io
         import csv as csv_mod
+        _restore_database_if_needed(runtime, database)
         result = materialize_database_query(
             database, query,
             parameters=_coerce_parameters(parameters),
@@ -2264,42 +2338,52 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         statement: str,
         parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        runtime._write_limiter.check("execute_database_statement")
         check_sql_safety(statement, allow_destructive=runtime.config.allow_destructive_sql)
         from spectral_packet_engine.database import check_database_file_size
-        result = to_serializable(
-            execute_database_statement(
-                database,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: execute_database_statement(
+                candidate_database,
                 statement,
                 parameters=_coerce_parameters(parameters),
                 create_if_missing=True,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
         check_database_file_size(database, max_size_mb=runtime.config.max_database_size_mb)
         _audit_log(runtime.config, "EXEC_STMT", database, statement=statement[:200])
-        return result
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "execute_database_script", "Run a multi-statement SQL script against a managed SQLite database.", bounded=True)
     def execute_database_script_tool(
         database: str,
         script: str,
     ) -> dict[str, Any]:
-        runtime._write_limiter.check("execute_database_script")
         check_sql_script_safety(script, allow_destructive=runtime.config.allow_destructive_sql)
         from spectral_packet_engine.database import check_database_file_size
-        result = to_serializable(
-            execute_database_script(
-                database,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: execute_database_script(
+                candidate_database,
                 script,
                 create_if_missing=True,
                 max_length_chars=runtime.config.max_script_length_chars,
                 max_statements=runtime.config.max_script_statements,
                 timeout_seconds=runtime.config.max_query_seconds,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
         check_database_file_size(database, max_size_mb=runtime.config.max_database_size_mb)
         _audit_log(runtime.config, "EXEC_SCRIPT", database, length=len(script))
-        return result
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "write_database_table", "Load a tabular dataset file FROM THE SERVER into a database table. The file must already be on the server (e.g. from write_scratch_file). For inline data, use upload_csv_to_database instead.", bounded=True)
     def write_database_table_tool(
@@ -2308,21 +2392,23 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         dataset_path: str,
         if_exists: str = "fail",
     ) -> dict[str, Any]:
-        runtime._write_limiter.check("write_database_table")
         _check_not_local_path(dataset_path, "write_database_table", runtime.config)
-        if if_exists == "replace" and runtime.config.auto_backup_on_replace:
-            scratch_dir = _managed_scratch_directory(runtime.config)
-            backup_table_before_replace(database, table_name, scratch_dir)
-        result = to_serializable(
-            write_tabular_dataset_to_database(
-                database,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: write_tabular_dataset_to_database(
+                candidate_database,
                 table_name,
                 load_tabular_dataset(dataset_path),
                 if_exists=if_exists,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
         _audit_log(runtime.config, "WRITE_TABLE", f"{database}/{table_name}", source=dataset_path)
-        return result
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "materialize_query_table", "Run a query and persist its result as a managed database table.", bounded=True)
     def materialize_query_table_tool(
@@ -2332,24 +2418,38 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         parameters: dict[str, Any] | None = None,
         replace: bool = False,
     ) -> dict[str, Any]:
-        return to_serializable(
-            materialize_database_query_to_table(
-                database,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: materialize_database_query_to_table(
+                candidate_database,
                 table_name,
                 query,
                 parameters=_coerce_parameters(parameters),
                 replace=replace,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "coerce_table_types", "Detect and fix column type affinities for an existing database table. Converts TEXT columns containing numeric data to INTEGER or REAL.", bounded=True)
     def coerce_table_types_tool(
         database: str,
         table_name: str,
     ) -> dict[str, Any]:
-        return to_serializable(
-            coerce_database_table_types(database, table_name)
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: coerce_database_table_types(candidate_database, table_name),
+            create_if_missing=False,
         )
+        payload = to_serializable(result)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "pivot_table", "Pivot a long-format table into wide format. Turns distinct values in pivot_column into separate columns.", bounded=True)
     def pivot_table_tool(
@@ -2362,14 +2462,21 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         aggregate: str = "MAX",
         replace: bool = False,
     ) -> dict[str, Any]:
-        return to_serializable(
-            pivot_database_table(
-                database, table_name, target_table,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: pivot_database_table(
+                candidate_database, table_name, target_table,
                 index_column, pivot_column, value_column,
                 aggregate=aggregate, replace=replace,
                 max_cardinality=runtime.config.max_pivot_cardinality,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "unpivot_table", "Unpivot (melt) a wide-format table into long format with variable/value columns.", bounded=True)
     def unpivot_table_tool(
@@ -2380,13 +2487,20 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         value_columns: list[str] | None = None,
         replace: bool = False,
     ) -> dict[str, Any]:
-        return to_serializable(
-            unpivot_database_table(
-                database, table_name, target_table,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: unpivot_database_table(
+                candidate_database, table_name, target_table,
                 id_columns, value_columns, replace=replace,
                 max_columns=runtime.config.max_unpivot_columns,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "interpolate_time_series", "Fill missing time steps in a table using linear interpolation and persist the result.", bounded=True)
     def interpolate_time_series_tool(
@@ -2398,14 +2512,21 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         step: float = 1.0,
         replace: bool = False,
     ) -> dict[str, Any]:
-        return to_serializable(
-            interpolate_database_time_series(
-                database, table_name, target_table,
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            database,
+            lambda candidate_database: interpolate_database_time_series(
+                candidate_database, table_name, target_table,
                 time_column, value_columns,
                 step=step, replace=replace,
                 max_steps=runtime.config.max_interpolation_steps,
-            )
+            ),
+            create_if_missing=True,
         )
+        payload = to_serializable(result)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(server, runtime, "window_aggregate", "Compute sliding window aggregates (AVG, SUM, COUNT, etc.) over a column.", bounded=True)
     def window_aggregate_tool(
@@ -2417,6 +2538,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         functions: list[str] | None = None,
     ) -> dict[str, Any]:
         fns = tuple(functions) if functions else ("AVG", "SUM", "COUNT")
+        _restore_database_if_needed(runtime, database)
         return to_serializable(
             window_aggregate_database_query(
                 database, table_name, value_column, order_by,
@@ -2442,6 +2564,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             analyze_profile_table_from_database_query,
             write_spectral_analysis_artifacts,
             "sql-analyze-table",
+            runtime,
             database, query,
             num_modes=num_modes, device=device, time_column=time_column,
             position_columns=position_columns, position_values=position_values, sort_by_time=sort_by_time,
@@ -2467,6 +2590,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             compress_profile_table_from_database_query,
             write_compression_artifacts,
             "sql-compress-table",
+            runtime,
             database, query,
             num_modes=num_modes, device=device, time_column=time_column,
             position_columns=position_columns, position_values=position_values, sort_by_time=sort_by_time,
@@ -2491,6 +2615,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         output_dir: str | None = None,
     ) -> dict[str, Any]:
         requested_includes = {"coefficients", "moments"} if not include else set(include)
+        _restore_database_if_needed(runtime, database)
         summary = export_feature_table_from_database_query(
             database,
             query,
@@ -2539,6 +2664,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         parameters: dict[str, Any] | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         report = build_profile_table_report_from_database_query(
             database,
             query,
@@ -2588,6 +2714,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         parameters: dict[str, Any] | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         summary = fit_gaussian_packet_to_profile_table_from_database_query(
             database,
             query,
@@ -2902,6 +3029,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         export_dir: str | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         summary = train_modal_surrogate_from_database_query(
             database,
             query,
@@ -2953,6 +3081,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         export_dir: str | None = None,
         output_dir: str | None = None,
     ) -> dict[str, Any]:
+        _restore_database_if_needed(runtime, database)
         summary = evaluate_modal_surrogate_from_database_query(
             database,
             query,
@@ -4818,47 +4947,51 @@ def create_mcp_server(config: MCPServerConfig | None = None):
                 grid_points=grid_points,
             )
         db_path = _managed_scratch_path(runtime.config, name)
+        def _create_database(candidate_database: str) -> dict[str, Any]:
+            db_info = bootstrap_local_database(candidate_database)
+            payload: dict[str, Any] = {
+                "database_path": str(db_path),
+                "tables": list(db_info.tables) if hasattr(db_info, "tables") else [],
+            }
+            if init_script is not None:
+                script_result = execute_database_script(
+                    candidate_database,
+                    init_script,
+                    create_if_missing=True,
+                    max_length_chars=runtime.config.max_script_length_chars,
+                    max_statements=runtime.config.max_script_statements,
+                    timeout_seconds=runtime.config.max_query_seconds,
+                )
+                payload["init_script"] = {
+                    "statement_count": script_result.statement_count,
+                }
+                db_info_after = inspect_database(candidate_database)
+                payload["tables"] = list(db_info_after.tables) if hasattr(db_info_after, "tables") else []
+            if populate_synthetic:
+                table = generate_synthetic_profile_table(
+                    num_profiles=num_profiles,
+                    grid_points=grid_points,
+                    device=device,
+                )
+                write_profile_table_to_database(candidate_database, "profiles", table, if_exists="replace")
+                payload["synthetic"] = {
+                    "table": "profiles",
+                    "num_profiles": num_profiles,
+                    "grid_points": grid_points,
+                    "position_count": int(table.profiles.shape[1]),
+                }
+            return payload
 
-        # Bootstrap the database
-        db_info = bootstrap_local_database(str(db_path))
+        result, storage_guard = _mutate_sqlite_database(
+            runtime,
+            str(db_path),
+            _create_database,
+            create_if_missing=True,
+        )
+        check_database_file_size(db_path, max_size_mb=runtime.config.max_database_size_mb)
         _audit_log(runtime.config, "CREATE_DB", name)
-        result: dict[str, Any] = {
-            "database_path": str(db_path),
-            "tables": list(db_info.tables) if hasattr(db_info, "tables") else [],
-        }
-
-        # Run init script if provided (CREATE TABLE, INSERT, etc.)
-        if init_script is not None:
-            script_result = execute_database_script(
-                str(db_path), init_script, create_if_missing=True,
-                max_length_chars=runtime.config.max_script_length_chars,
-                max_statements=runtime.config.max_script_statements,
-                timeout_seconds=runtime.config.max_query_seconds,
-            )
-            result["init_script"] = {
-                "statement_count": script_result.statement_count,
-            }
-            # Refresh table list after init
-            db_info_after = inspect_database(str(db_path))
-            result["tables"] = list(db_info_after.tables) if hasattr(db_info_after, "tables") else []
-            # Check DB size after script execution
-            check_database_file_size(db_path, max_size_mb=runtime.config.max_database_size_mb)
-
-        if populate_synthetic:
-            table = generate_synthetic_profile_table(
-                num_profiles=num_profiles,
-                grid_points=grid_points,
-                device=device,
-            )
-            write_profile_table_to_database(str(db_path), "profiles", table, if_exists="replace")
-
-            result["synthetic"] = {
-                "table": "profiles",
-                "num_profiles": num_profiles,
-                "grid_points": grid_points,
-                "position_count": int(table.profiles.shape[1]),
-            }
-
+        if storage_guard is not None:
+            result["storage_guard"] = storage_guard
         return result
 
     @_tool(
@@ -4902,15 +5035,25 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             }
         else:
             db_path = _managed_scratch_path(runtime.config, f"{output_name}.db")
-            bootstrap_local_database(str(db_path))
-            write_profile_table_to_database(str(db_path), "profiles", table, if_exists="replace")
-            return {
+            result, storage_guard = _mutate_sqlite_database(
+                runtime,
+                str(db_path),
+                lambda candidate_database: (
+                    bootstrap_local_database(candidate_database),
+                    write_profile_table_to_database(candidate_database, "profiles", table, if_exists="replace"),
+                )[1],
+                create_if_missing=True,
+            )
+            payload = {
                 "database_path": str(db_path),
                 "table": "profiles",
                 "format": "sqlite",
                 "num_profiles": num_profiles,
                 "grid_points": grid_points,
             }
+            if storage_guard is not None:
+                payload["storage_guard"] = storage_guard
+            return payload
 
     @_tool(
         server,
@@ -4928,6 +5071,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
     ) -> dict[str, Any]:
         runtime._write_limiter.check("write_scratch_file")
         sanitize_filename(filename)
+        if Path(filename).suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+            raise PermissionError(
+                "write_scratch_file cannot overwrite managed SQLite databases. "
+                "Use create_scratch_database or the database tools instead."
+            )
         scratch_dir = _managed_scratch_directory(runtime.config)
         check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
         check_scratch_total_size(scratch_dir, runtime.config.max_scratch_total_mb)
@@ -5005,6 +5153,15 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "files": files,
         }
 
+    @_tool(
+        server,
+        runtime,
+        "inspect_storage_economy",
+        "Inspect the managed SQLite protection economy: protected mass, spendable mutation budget, refill rate, snapshots, and registered databases.",
+    )
+    def inspect_storage_economy_tool() -> dict[str, Any]:
+        return runtime._storage_economy.inspect().to_dict()
+
     # ================================================================
     # Shortcut Tools — combine multiple steps into one call
     # ================================================================
@@ -5025,7 +5182,6 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         table_name: str = "data",
         if_exists: str = "fail",
     ) -> dict[str, Any]:
-        runtime._write_limiter.check("upload_csv_to_database")
         from spectral_packet_engine.database import check_database_file_size
         scratch_dir = _managed_scratch_directory(runtime.config)
         check_scratch_file_count(scratch_dir, runtime.config.max_scratch_files)
@@ -5040,25 +5196,28 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         csv_path = _managed_scratch_path(runtime.config, csv_filename)
         csv_path.write_text(csv_content, encoding="utf-8")
         db_path = _managed_scratch_path(runtime.config, database)
-        # Auto-backup before replace
-        if if_exists == "replace" and runtime.config.auto_backup_on_replace:
-            backup_table_before_replace(db_path, table_name, scratch_dir)
         try:
-            result = to_serializable(
-                write_tabular_dataset_to_database(
-                    str(db_path),
+            result, storage_guard = _mutate_sqlite_database(
+                runtime,
+                str(db_path),
+                lambda candidate_database: write_tabular_dataset_to_database(
+                    candidate_database,
                     table_name,
                     load_tabular_dataset(str(csv_path)),
                     if_exists=if_exists,
                     create_if_missing=True,
-                )
+                ),
+                create_if_missing=True,
             )
         finally:
             csv_path.unlink(missing_ok=True)
         check_database_file_size(db_path, max_size_mb=runtime.config.max_database_size_mb)
         _audit_log(runtime.config, "UPLOAD_CSV_TO_DB", f"{database}/{table_name}", csv_size=len(csv_content))
-        result["database_path"] = str(db_path)
-        return result
+        payload = to_serializable(result)
+        payload["database_path"] = str(db_path)
+        if storage_guard is not None:
+            payload["storage_guard"] = storage_guard
+        return payload
 
     @_tool(
         server,
@@ -5133,6 +5292,11 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         path = _managed_scratch_path(runtime.config, filename)
         if not path.exists():
             raise FileNotFoundError(f"File {filename!r} not found in scratch directory.")
+        if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+            raise PermissionError(
+                "Managed SQLite database files cannot be deleted through delete_scratch_file. "
+                "They are protected by the storage economy and snapshot guard."
+            )
         size = path.stat().st_size
         path.unlink()
         _audit_log(runtime.config, "DELETE", filename, freed_bytes=size)
@@ -5483,6 +5647,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
         scratch_dir = _managed_scratch_directory(runtime.config)
         tool_count, tool_catalog_fingerprint = _tool_catalog_fingerprint(server)
         http_bridge_tool_count, http_bridge_fingerprint = _http_bridge_fingerprint(server)
+        storage_snapshot = runtime._storage_economy.inspect()
 
         return {
             "hostname": hostname,
@@ -5495,6 +5660,7 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "streamable_http_path": runtime.config.streamable_http_path,
             "endpoint_url": runtime.config.endpoint_url,
             "scratch_dir": str(scratch_dir),
+            "storage_guard_dir": str(runtime.config.storage_guard_directory_path),
             "allowed_hosts": list(runtime.config.allowed_hosts),
             "allowed_origins": list(runtime.config.allowed_origins),
             "registered_tool_count": tool_count,
@@ -5504,6 +5670,8 @@ def create_mcp_server(config: MCPServerConfig | None = None):
             "max_concurrent_tasks": runtime.config.max_concurrent_tasks,
             "log_destination": runtime.config.log_destination,
             "allow_unsafe_python": runtime.config.allow_unsafe_python,
+            "storage_economy": storage_snapshot.to_dict(),
+            "startup_storage_recoveries": list(runtime._startup_recoveries),
             "http_compatibility_routes": _http_mirror_manifest(server),
             "network_note": (
                 "Use bind_host/bind_port/endpoint_url as the authoritative connection facts. "
@@ -5618,6 +5786,11 @@ def _build_mcp_module_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scratch-dir", default=None)
     parser.add_argument("--allowed-host", action="append", default=None)
     parser.add_argument("--allowed-origin", action="append", default=None)
+    parser.add_argument("--storage-protection-window-seconds", type=float, default=86_400.0)
+    parser.add_argument("--storage-seed-bytes", type=int, default=8 * 1024 * 1024)
+    parser.add_argument("--storage-minimum-mutation-cost-bytes", type=int, default=4096)
+    parser.add_argument("--storage-snapshot-retention", type=int, default=8)
+    parser.add_argument("--disable-managed-db-restore", action="store_true")
     parser.add_argument(
         "--allow-unsafe-python",
         action="store_true",
@@ -5642,5 +5815,10 @@ if __name__ == "__main__":
             scratch_directory=args.scratch_dir,
             allowed_hosts=() if args.allowed_host is None else tuple(args.allowed_host),
             allowed_origins=() if args.allowed_origin is None else tuple(args.allowed_origin),
+            storage_protection_window_seconds=args.storage_protection_window_seconds,
+            storage_seed_bytes=args.storage_seed_bytes,
+            storage_minimum_mutation_cost_bytes=args.storage_minimum_mutation_cost_bytes,
+            storage_snapshot_retention=args.storage_snapshot_retention,
+            restore_managed_databases_on_startup=not args.disable_managed_db_restore,
         )
     )

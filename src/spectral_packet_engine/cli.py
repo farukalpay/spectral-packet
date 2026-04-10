@@ -1304,6 +1304,11 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_parser.add_argument("--max-pivot-cardinality", type=int, default=500, help="Max distinct values for pivot.")
     mcp_parser.add_argument("--max-interpolation-steps", type=int, default=100000, help="Max steps for time series interpolation.")
     mcp_parser.add_argument("--rate-limit-per-minute", type=int, default=120, help="Max tool calls per minute.")
+    mcp_parser.add_argument("--storage-protection-window-seconds", type=float, default=86400.0, help="Seconds needed to refill one protected-database worth of mutation budget.")
+    mcp_parser.add_argument("--storage-seed-bytes", type=int, default=8 * 1024 * 1024, help="Bootstrap mutation budget when no protected database mass exists yet.")
+    mcp_parser.add_argument("--storage-minimum-mutation-cost-bytes", type=int, default=4096, help="Minimum charged mutation size for managed SQLite writes.")
+    mcp_parser.add_argument("--storage-snapshot-retention", type=int, default=8, help="How many historical managed-database snapshots to keep.")
+    mcp_parser.add_argument("--disable-managed-db-restore", action="store_true", help="Disable startup restore of managed SQLite databases from snapshots.")
 
     _add_command_parser(
         subparsers,
@@ -2467,6 +2472,11 @@ def _run(args, parser: argparse.ArgumentParser) -> int:
                 max_pivot_cardinality=getattr(args, "max_pivot_cardinality", 500),
                 max_interpolation_steps=getattr(args, "max_interpolation_steps", 100000),
                 rate_limit_per_minute=getattr(args, "rate_limit_per_minute", 120),
+                storage_protection_window_seconds=getattr(args, "storage_protection_window_seconds", 86400.0),
+                storage_seed_bytes=getattr(args, "storage_seed_bytes", 8 * 1024 * 1024),
+                storage_minimum_mutation_cost_bytes=getattr(args, "storage_minimum_mutation_cost_bytes", 4096),
+                storage_snapshot_retention=getattr(args, "storage_snapshot_retention", 8),
+                restore_managed_databases_on_startup=not getattr(args, "disable_managed_db_restore", False),
             )
         )
         return 0

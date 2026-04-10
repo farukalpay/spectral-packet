@@ -125,6 +125,11 @@ class MCPServerConfig:
     max_scratch_total_mb: float = 512.0
     allow_destructive_sql: bool = False
     auto_backup_on_replace: bool = True
+    storage_protection_window_seconds: float = 86_400.0
+    storage_seed_bytes: int = 8 * 1024 * 1024
+    storage_minimum_mutation_cost_bytes: int = 4096
+    storage_snapshot_retention: int = 8
+    restore_managed_databases_on_startup: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "transport", _normalize_transport(self.transport))
@@ -156,6 +161,14 @@ class MCPServerConfig:
             raise ValueError("max_interpolation_steps must be positive")
         if self.rate_limit_per_minute <= 0:
             raise ValueError("rate_limit_per_minute must be positive")
+        if self.storage_protection_window_seconds <= 0:
+            raise ValueError("storage_protection_window_seconds must be positive")
+        if self.storage_seed_bytes < 0:
+            raise ValueError("storage_seed_bytes must be non-negative")
+        if self.storage_minimum_mutation_cost_bytes <= 0:
+            raise ValueError("storage_minimum_mutation_cost_bytes must be positive")
+        if self.storage_snapshot_retention <= 0:
+            raise ValueError("storage_snapshot_retention must be positive")
         object.__setattr__(self, "log_level", _normalize_log_level(self.log_level))
         object.__setattr__(self, "log_file", None if self.log_file is None else str(self.log_file))
         object.__setattr__(self, "allow_unsafe_python", bool(self.allow_unsafe_python))
@@ -182,6 +195,10 @@ class MCPServerConfig:
     @property
     def scratch_directory_path(self) -> Path:
         return resolve_mcp_scratch_dir(self)
+
+    @property
+    def storage_guard_directory_path(self) -> Path:
+        return self.scratch_directory_path / "_storage_guard"
 
     @property
     def endpoint_url(self) -> str | None:
@@ -278,6 +295,10 @@ def inspect_mcp_runtime(
         else:
             notes.append("The execute_python tool is disabled by default; enable it explicitly only for trusted local sessions.")
         notes.append(f"Managed scratch files live under {chosen_config.scratch_directory_path}.")
+        notes.append(
+            "Managed SQLite mutations are guarded by a persistent storage economy with "
+            f"a {chosen_config.storage_protection_window_seconds:.0f}s protection window."
+        )
 
     if system == "Linux":
         if chosen_config.transport == "streamable-http":

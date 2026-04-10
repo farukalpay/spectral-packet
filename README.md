@@ -485,6 +485,17 @@ spectral-packet-engine serve-mcp --transport streamable-http --port 8765 --strea
 
 All security limits (rate limiting, query timeouts, database size caps, audit logging) are enabled by default. See `spectral-packet-engine serve-mcp --help` for tunable parameters.
 
+Managed SQLite databases now sit behind a persistent storage economy and snapshot guard:
+
+- existing scratch databases are sealed on first startup and become protected mass,
+- write and delete cost is measured from the actual SQLite page diff, not only from request count,
+- the spendable mutation budget refills over `--storage-protection-window-seconds` and scales with protected database size,
+- `write_scratch_file` cannot overwrite `.db` / `.sqlite` files and `delete_scratch_file` cannot remove managed databases,
+- missing managed databases are restored automatically from guarded snapshots on server startup,
+- `inspect_storage_economy` and `server_info` expose the live budget, refill rate, and registered database set.
+
+The default protection window is one day. In other words, mutating one current-database worth of SQLite pages again takes roughly one day of accumulated budget unless you lower the protection settings explicitly.
+
 If you publish MCP behind a reverse proxy, expose both the exact mount (`/mcp`) and the scoped prefix (`/mcp/`). Publishing only the exact mount can make the MCP session itself work while path-based bridge routes such as `/mcp/tool_registry` and `/mcp/inspect_product` fail.
 
 For a restartable containerized deployment:
@@ -496,6 +507,7 @@ docker compose up -d --build
 That starts the MCP server on `http://127.0.0.1:8765/mcp`, mounts persistent scratch/log volumes under `docker-data/`, and health-checks the real callable MCP bridge route at `/mcp/server_info`.
 The compose file binds to `127.0.0.1` by default so reverse-proxy deployments do not accidentally expose the MCP listener directly; override `SPE_PUBLISHED_HOST` only when you intentionally want a wider bind.
 The repository Docker image installs the CPU PyTorch wheel explicitly so Linux hosts do not silently pull a multi-gigabyte CUDA runtime just to serve the default MCP surface.
+The same container keeps the storage-economy ledger and guarded SQLite snapshots under the persisted scratch volume, so a container restart can restore managed databases instead of starting from an empty scratch directory.
 
 If you keep `.env` populated with your remote host settings, you can push the Docker deployment with:
 

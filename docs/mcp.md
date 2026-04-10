@@ -243,7 +243,8 @@ The repository guarantees a narrow in-process runtime model for MCP:
 - repository-managed logging on stderr or an explicit file,
 - bounded in-process execution slots for compute-heavy tools,
 - shared workflow execution with the same spectral engine used by Python, CLI, and API,
-- atomic artifact writes and output-directory locking for artifact-producing tools.
+- atomic artifact writes and output-directory locking for artifact-producing tools,
+- a persistent managed-SQLite storage economy with guarded snapshots and startup restore.
 
 The repository does not promise:
 
@@ -253,6 +254,8 @@ The repository does not promise:
 - a generic job-queue platform.
 
 If a heavy tool cannot acquire an execution slot before the configured timeout, it fails clearly so the client can retry or reduce concurrency expectations.
+
+For managed SQLite databases, mutation cost is measured from the actual SQLite page diff and charged against a persistent byte budget. The refill rate scales with protected database mass, so mutating one current-database worth of pages again takes roughly one protection window. By default that window is one day. Scratch helpers cannot overwrite or delete managed `.db` / `.sqlite` files directly; use the database tools and inspect the live policy through `inspect_storage_economy` or `server_info`.
 
 ## Artifacts
 

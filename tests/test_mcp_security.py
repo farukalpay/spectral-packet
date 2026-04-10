@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-import tempfile
+import sqlite3
 from pathlib import Path
 
 from spectral_packet_engine.mcp_security import (
@@ -13,6 +13,10 @@ from spectral_packet_engine.mcp_security import (
     check_sql_script_safety,
     backup_table_before_replace,
     sanitize_filename,
+)
+from spectral_packet_engine.storage_economy import (
+    ManagedSQLiteEconomy,
+    StorageBudgetExceeded,
 )
 
 
@@ -158,3 +162,139 @@ class TestFilenameSanitization:
     def test_blocks_control_chars(self):
         with pytest.raises(ValueError, match="control characters"):
             sanitize_filename("bad\nname.csv")
+
+
+class TestManagedSQLiteEconomy:
+    def test_restores_deleted_registered_database(self, tmp_path):
+        database_path = tmp_path / "protected.sqlite"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, value REAL)")
+            connection.execute("INSERT INTO metrics (value) VALUES (1.0)")
+            connection.commit()
+
+        economy = ManagedSQLiteEconomy(tmp_path / "_guard", minimum_seed_bytes=1024 * 1024)
+        record = economy.register_database(database_path)
+
+        assert record is not None
+        database_path.unlink()
+        assert not database_path.exists()
+
+        restored = economy.restore_database_if_needed(database_path)
+
+        assert restored == str(database_path.resolve())
+        with sqlite3.connect(database_path) as connection:
+            rows = connection.execute("SELECT value FROM metrics").fetchall()
+        assert rows == [(1.0,)]
+
+    def test_existing_database_starts_protected_without_spendable_budget(self, tmp_path):
+        database_path = tmp_path / "protected.sqlite"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, value REAL)")
+            connection.execute("INSERT INTO metrics (value) VALUES (1.0)")
+            connection.commit()
+
+        economy = ManagedSQLiteEconomy(tmp_path / "_guard", minimum_seed_bytes=1024 * 1024)
+        economy.register_database(database_path)
+
+        def _insert(candidate_database: str):
+            with sqlite3.connect(candidate_database) as connection:
+                connection.execute("INSERT INTO metrics (value) VALUES (2.0)")
+                connection.commit()
+
+        with pytest.raises(StorageBudgetExceeded):
+            economy.mutate_sqlite(database_path, _insert)
+
+        with sqlite3.connect(database_path) as connection:
+            values = connection.execute("SELECT value FROM metrics ORDER BY id").fetchall()
+        assert values == [(1.0,)]
+
+    def test_new_database_can_bootstrap_from_seed_budget(self, tmp_path):
+        database_path = tmp_path / "seeded.sqlite"
+        economy = ManagedSQLiteEconomy(tmp_path / "_guard", minimum_seed_bytes=1024 * 1024)
+
+        def _bootstrap(candidate_database: str) -> str:
+            with sqlite3.connect(candidate_database) as connection:
+                connection.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, value REAL)")
+                connection.commit()
+            return "bootstrapped"
+
+        result, receipt = economy.mutate_sqlite(
+            database_path,
+            _bootstrap,
+        )
+
+        assert result is not None
+        assert database_path.exists()
+        assert receipt.changed_bytes > 0
+        assert receipt.balance_after_bytes < receipt.balance_before_bytes
+
+
+class TestManagedDatabaseMCPIntegration:
+    def test_write_scratch_file_rejects_database_filenames(self, tmp_path):
+        pytest.importorskip("mcp.server.fastmcp")
+        from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+        async def _call():
+            server = create_mcp_server(MCPServerConfig(scratch_directory=str(tmp_path)))
+            _, payload = await server.call_tool(
+                "write_scratch_file",
+                {"filename": "clobber.db", "content": "not sqlite"},
+            )
+            return payload
+
+        payload = __import__("asyncio").run(_call())
+        assert payload["error"] is True
+        assert payload["error_type"] == "PermissionError"
+
+    def test_startup_restore_recovers_deleted_managed_database(self, tmp_path):
+        pytest.importorskip("mcp.server.fastmcp")
+        from spectral_packet_engine import MCPServerConfig, create_mcp_server
+
+        async def _create_and_insert():
+            server = create_mcp_server(
+                MCPServerConfig(
+                    scratch_directory=str(tmp_path),
+                    storage_seed_bytes=1024 * 1024,
+                )
+            )
+            _, create_payload = await server.call_tool(
+                "create_scratch_database",
+                {"name": "guarded.sqlite"},
+            )
+            database_path = create_payload["database_path"]
+            _, script_payload = await server.call_tool(
+                "execute_database_script",
+                {
+                    "database": database_path,
+                    "script": """
+                    CREATE TABLE metrics (id INTEGER PRIMARY KEY, value REAL);
+                    INSERT INTO metrics (value) VALUES (1.0);
+                    """,
+                },
+            )
+            return database_path, script_payload
+
+        database_path, script_payload = __import__("asyncio").run(_create_and_insert())
+        assert script_payload.get("error") is not True
+        Path(database_path).unlink()
+        assert not Path(database_path).exists()
+
+        async def _query_after_restart():
+            server = create_mcp_server(
+                MCPServerConfig(
+                    scratch_directory=str(tmp_path),
+                    storage_seed_bytes=1024 * 1024,
+                )
+            )
+            _, payload = await server.call_tool(
+                "query_database",
+                {
+                    "database": database_path,
+                    "query": "SELECT value FROM metrics",
+                },
+            )
+            return payload
+
+        payload = __import__("asyncio").run(_query_after_restart())
+        assert payload["table"]["row_count"] == 1
+        assert payload["table"]["rows"][0]["value"] == 1.0

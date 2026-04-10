@@ -93,6 +93,8 @@ Once connected, the AI agent should call `self_test` to verify the server is ful
 - `allowed_origins`
 - `scratch_dir`
 
+For managed SQLite protection details, also inspect `storage_guard_dir`, `storage_economy`, and `startup_storage_recoveries` from `server_info`, or call `inspect_storage_economy` directly.
+
 Important runtime rule: `execute_python` is disabled by default. Only use the examples below when the operator intentionally started the server with `--allow-unsafe-python` for a trusted local session.
 
 ## Tool Overview
@@ -113,6 +115,8 @@ Important runtime rule: `execute_python` is disabled by default. Only use the ex
 | Code Execution & Scratch | `execute_python` (trusted opt-in), `create_scratch_database`, `generate_synthetic_profiles`, `demo_spectral_pipeline` |
 | Artifact Inspection | `list_artifacts` |
 | Audit | `write_audit_log` |
+
+Managed SQLite note: scratch databases are protected by a persistent byte-budget economy. Writes and deletes consume budget based on the actual SQLite page diff, scratch helpers cannot overwrite or delete `.db` files directly, and missing managed databases are restored from snapshots on startup by default.
 
 ## Example Sessions
 

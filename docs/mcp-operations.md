@@ -54,6 +54,7 @@ docker compose up -d --build
 That publishes `http://127.0.0.1:8765/mcp`, persists scratch and logs under `docker-data/`, and health-checks the real callable bridge route at `/mcp/server_info` instead of a synthetic placeholder.
 The compose contract binds to `127.0.0.1` by default so an nginx or Caddy front end can stay the only public edge; override `SPE_PUBLISHED_HOST` only when a direct bind is intentional.
 The Docker image installs the CPU PyTorch wheel explicitly so a default Linux deployment does not pull CUDA-heavy runtimes unless you choose a different container build.
+The persisted scratch volume now also carries `_storage_guard/`, which stores the managed SQLite mutation ledger plus guarded snapshots. If a managed scratch database disappears between restarts, the next container startup restores it automatically from that guard state unless `SPE_STORAGE_RESTORE_ON_STARTUP=false` was set deliberately.
 
 If `.env` is populated with the remote host settings, the repository can push the same Docker deployment over SSH:
 
@@ -65,6 +66,25 @@ The deploy script exports a stable `COMPOSE_PROJECT_NAME`, removes older managed
 If `SPE_PUBLIC_HOSTS` is configured, the container entrypoint auto-derives `SPE_ALLOWED_HOSTS` and `SPE_ALLOWED_ORIGINS` from the public ingress contract instead of leaving Host/Origin policy to manual drift.
 If `SPE_INSTALL_NGINX_SITE=true`, the deploy script also renders a site file from the shared library plan, installs it under `/etc/nginx/sites-available`, enables it, validates `nginx -t`, reloads nginx, and verifies both the site root and `/mcp/server_info` through the local reverse proxy.
 With `SPE_NGINX_SITE_MODE=detect` the deploy script first checks whether another enabled nginx site already owns one of the requested public hosts. When it detects a shared host, it refuses to install a competing server block, writes the generated MCP `location` snippet to `/etc/nginx/snippets/`, and exits with diagnostics instead of leaving hostname routing ambiguous.
+
+### Managed SQLite protection
+
+Managed SQLite databases are no longer treated like ordinary scratch files.
+
+- Existing managed databases are sealed into the storage guard on first startup.
+- SQLite mutation cost is measured from the actual page diff, so rewrites and deletes burn the same byte-denominated budget.
+- The sustainable mutation rate is `protected_database_bytes / SPE_STORAGE_PROTECTION_WINDOW_SECONDS`.
+- By default, that window is `86400` seconds, so mutating one current-database worth of pages again takes roughly one day of accumulated budget.
+- `write_scratch_file` cannot overwrite `.db` / `.sqlite` files and `delete_scratch_file` cannot remove managed databases.
+- `inspect_storage_economy` and `server_info` expose the current protected mass, spendable balance, refill rate, and guarded snapshot paths.
+
+Useful environment variables for Docker and remote deploy:
+
+- `SPE_STORAGE_PROTECTION_WINDOW_SECONDS`
+- `SPE_STORAGE_SEED_BYTES`
+- `SPE_STORAGE_MINIMUM_MUTATION_COST_BYTES`
+- `SPE_STORAGE_SNAPSHOT_RETENTION`
+- `SPE_STORAGE_RESTORE_ON_STARTUP`
 
 Published HTTPS route:
 

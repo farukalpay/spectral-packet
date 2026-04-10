@@ -51,11 +51,19 @@ set -- \
   --max-concurrent-tasks "${SPE_MCP_MAX_CONCURRENT:-2}" \
   --slot-timeout-seconds "${SPE_MCP_SLOT_TIMEOUT_SECONDS:-60}" \
   --log-level "${SPE_MCP_LOG_LEVEL:-warning}" \
+  --storage-protection-window-seconds "${SPE_STORAGE_PROTECTION_WINDOW_SECONDS:-86400}" \
+  --storage-seed-bytes "${SPE_STORAGE_SEED_BYTES:-8388608}" \
+  --storage-minimum-mutation-cost-bytes "${SPE_STORAGE_MINIMUM_MUTATION_COST_BYTES:-4096}" \
+  --storage-snapshot-retention "${SPE_STORAGE_SNAPSHOT_RETENTION:-8}" \
   --scratch-dir "$scratch_dir" \
   --log-file "$log_file"
 
 if [ "${SPE_ALLOW_UNSAFE_PYTHON:-false}" = "true" ]; then
   set -- "$@" --allow-unsafe-python
+fi
+
+if [ "${SPE_STORAGE_RESTORE_ON_STARTUP:-true}" != "true" ]; then
+  set -- "$@" --disable-managed-db-restore
 fi
 
 old_ifs="${IFS}"
